@@ -20,3 +20,28 @@ if (("quickjs" as string).length !== 7)
     throw new Error("type assertion was not erased");
 if (typedCallback(definitelyPoint.x) !== "20")
     throw new Error("function types or non-null assertions were not erased");
+
+interface Drawable {
+    draw(): void;
+}
+
+class Box implements Drawable {
+    public readonly size: number;
+
+    constructor(size: number) {
+        this.size = size;
+    }
+
+    draw(): void {}
+}
+
+const { width, height }: { width: number; height: number } = { width: 2, height: 3 };
+try {
+    throw new Error("boom");
+} catch (error: unknown) {
+    if (!(error instanceof Error))
+        throw new Error("catch type annotation was not erased");
+}
+
+if (Box && width + height + new Box(4).size !== 9)
+    throw new Error("class or destructuring TypeScript syntax was not erased");

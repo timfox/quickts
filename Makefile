@@ -125,6 +125,11 @@ cxxtest: cxxtest.cc quickjs.h
 test: $(QJS)
 	$(RUN262) -c tests.conf
 
+typescript-test: $(QJS)
+	$(QJS) tests/typescript-erasable.ts
+	$(QJS) tests/typescript-class.ts
+	$(QJS) tests/typescript-modules.mts
+
 test262: $(QJS)
 	$(RUN262) -m -c test262.conf -a
 
@@ -146,4 +151,4 @@ unicode_gen: $(BUILD_DIR)
 libunicode-table.h: unicode_gen
 	$(BUILD_DIR)/unicode_gen unicode $@
 
-.PHONY: all amalgam ctest cxxtest debug fuzz jscheck install clean codegen distclean stats test test262 test262-update test262-check microbench unicode_gen $(QJS) $(QJSC)
+.PHONY: all amalgam ctest cxxtest debug fuzz jscheck install clean codegen distclean stats test typescript-test test262 test262-update test262-check microbench unicode_gen $(QJS) $(QJSC)
