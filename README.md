@@ -1,9 +1,9 @@
-# ⚡️ QuickJS - A mighty JavaScript engine
+# ⚡️ QuickTS - A mighty TypeScript engine
 
 ## Overview
 
-QuickJS is a small and embeddable JavaScript engine. It aims to support the latest
-[ECMAScript] specification.
+QuickTS is a small and embeddable TypeScript engine. It aims to support the latest
+[ECMAScript] specification and TypeScript.
 
 This project is a _fork_ of the [original QuickJS project] by Fabrice Bellard and Charlie Gordon, after it went dormant, with the intent of reigniting its development.
 
