@@ -136,6 +136,7 @@ typescript-test: $(QJS)
 	$(QJS) tests/typescript-export-enum.mts
 	$(QJS) tests/typescript-namespace.ts
 	$(QJS) --typecheck tests/typescript-typecheck.ts
+	$(QJS) --typecheck tests/typescript-typecheck-infer.ts
 	! $(QJS) --typecheck -e 'const x: number = "bad";' 2>/dev/null
 	$(QJS) examples/hello.ts
 	$(QJS) examples/hello_module.mts

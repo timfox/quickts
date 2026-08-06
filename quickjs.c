@@ -22426,7 +22426,12 @@ typedef struct JSParseState {
     bool is_module; /* parsing a module */
     bool is_typescript; /* discard TypeScript's erasable syntax */
     bool ts_typecheck; /* check primitive type annotations */
-    JSAtom ts_namespace_name; /* non-zero while lowering a namespace body */
+    JSAtom ts_namespace_name; /* namespace object var while lowering a body */
+    int ts_namespace_path_len; /* >1 for dotted namespace names */
+    JSAtom ts_namespace_path[8];
+    JSAtom ts_ctor_param_props[16]; /* TypeScript ctor parameter properties */
+    uint16_t ts_ctor_param_prop_arg_idx[16];
+    int ts_ctor_param_prop_count;
     bool allow_html_comments;
 } JSParseState;
 
@@ -22455,6 +22460,7 @@ static __exception int js_parse_typescript_namespace(JSParseState *s,
                                                      bool export_flag);
 static void js_emit_namespace_put_member(JSParseState *s, JSAtom member);
 static TSSimpleType js_parse_peek_typescript_simple_type(JSParseState *s);
+static TSSimpleType js_parse_infer_typescript_type(JSParseState *s);
 static __exception int js_parse_check_typescript_init(JSParseState *s,
                                                       TSSimpleType expected);
 
@@ -29191,6 +29197,47 @@ static __exception int js_parse_skip_typescript_modifiers(JSParseState *s)
     }
 }
 
+static __exception int js_parse_typescript_ctor_param_modifiers(JSParseState *s,
+                                                                bool *is_param_prop)
+{
+    *is_param_prop = false;
+    for (;;) {
+        if (s->token.val == TOK_PUBLIC || s->token.val == TOK_PRIVATE ||
+            s->token.val == TOK_PROTECTED) {
+            *is_param_prop = true;
+            if (next_token(s))
+                return -1;
+        } else if (ts_token_is(s, "readonly")) {
+            *is_param_prop = true;
+            if (next_token(s))
+                return -1;
+        } else if (ts_token_is(s, "override") || ts_token_is(s, "abstract") ||
+                   ts_token_is(s, "declare")) {
+            if (next_token(s))
+                return -1;
+        } else {
+            return 0;
+        }
+    }
+}
+
+static void js_emit_typescript_ctor_param_props(JSParseState *s)
+{
+    int i;
+
+    for (i = 0; i < s->ts_ctor_param_prop_count; i++) {
+        emit_op(s, OP_scope_get_var);
+        emit_atom(s, JS_ATOM_this);
+        emit_u16(s, 0);
+        emit_op(s, OP_get_arg);
+        emit_u16(s, s->ts_ctor_param_prop_arg_idx[i]);
+        emit_op(s, OP_define_field);
+        emit_atom(s, s->ts_ctor_param_props[i]);
+        emit_op(s, OP_drop);
+    }
+    s->ts_ctor_param_prop_count = 0;
+}
+
 static __exception int js_parse_skip_braced(JSParseState *s)
 {
     int brace = 1;
@@ -29225,14 +29272,55 @@ static TSSimpleType js_parse_peek_typescript_simple_type(JSParseState *s)
     return TS_TYPE_UNKNOWN;
 }
 
+static TSSimpleType js_parse_infer_typescript_type(JSParseState *s)
+{
+    JSFunctionDef *fd = s->cur_func;
+    int opcode;
+
+    if (!fd || fd->last_opcode_pos < 0)
+        return TS_TYPE_UNKNOWN;
+    opcode = get_prev_opcode(fd);
+    switch (opcode) {
+    case OP_push_i32:
+        return TS_TYPE_NUMBER;
+    case OP_push_true:
+    case OP_push_false:
+        return TS_TYPE_BOOLEAN;
+    case OP_push_atom_value:
+        return TS_TYPE_STRING;
+    case OP_push_const:
+        {
+            int idx = get_u32(fd->byte_code.buf + fd->last_opcode_pos + 1);
+            JSValue val;
+            if ((unsigned)idx >= (unsigned)fd->cpool_count)
+                return TS_TYPE_UNKNOWN;
+            val = fd->cpool[idx];
+            if (JS_IsNumber(val))
+                return TS_TYPE_NUMBER;
+            if (JS_IsString(val))
+                return TS_TYPE_STRING;
+            if (JS_IsBool(val))
+                return TS_TYPE_BOOLEAN;
+        }
+        break;
+    default:
+        break;
+    }
+    return TS_TYPE_UNKNOWN;
+}
+
 static __exception int js_parse_check_typescript_init(JSParseState *s,
                                                       TSSimpleType expected)
 {
+    TSSimpleType actual;
     int opcode;
 
     if (!s->ts_typecheck || expected == TS_TYPE_UNKNOWN || expected == TS_TYPE_ANY)
         return 0;
     opcode = get_prev_opcode(s->cur_func);
+    actual = js_parse_infer_typescript_type(s);
+    if (actual != TS_TYPE_UNKNOWN && actual != expected)
+        return js_parse_error(s, "type mismatch in initializer");
     switch (expected) {
     case TS_TYPE_NUMBER:
         if (opcode != OP_push_i32 && opcode != OP_push_const)
@@ -29249,6 +29337,47 @@ static __exception int js_parse_check_typescript_init(JSParseState *s,
     default:
         break;
     }
+    return 0;
+}
+
+static void js_emit_namespace_load_path_atoms(JSParseState *s, JSAtom *path,
+                                              int path_len)
+{
+    int i;
+
+    emit_op(s, OP_scope_get_var);
+    emit_atom(s, path[0]);
+    emit_u16(s, s->cur_func->scope_level);
+    for (i = 1; i < path_len; i++) {
+        emit_op(s, OP_get_field);
+        emit_atom(s, path[i]);
+    }
+}
+
+static __exception int js_parse_typescript_qualified_name(JSParseState *s,
+                                                          JSAtom *path,
+                                                          int *plen)
+{
+    JSContext *ctx = s->ctx;
+    int n = 0;
+
+    if (s->token.val != TOK_IDENT)
+        return js_parse_error(s, "namespace name expected");
+    path[n++] = JS_DupAtom(ctx, s->token.u.ident.atom);
+    if (next_token(s))
+        return -1;
+    while (s->token.val == '.') {
+        if (n >= 8)
+            return js_parse_error(s, "namespace path too long");
+        if (next_token(s))
+            return -1;
+        if (s->token.val != TOK_IDENT)
+            return js_parse_error(s, "namespace name expected");
+        path[n++] = JS_DupAtom(ctx, s->token.u.ident.atom);
+        if (next_token(s))
+            return -1;
+    }
+    *plen = n;
     return 0;
 }
 
@@ -29417,7 +29546,30 @@ static __exception int js_parse_typescript_namespace_body(JSParseState *s)
                 continue;
             }
             if (tok == TOK_CLASS) {
-                return js_parse_error(s, "export class in namespace is not supported");
+                JSAtom class_name = JS_ATOM_NULL;
+                JSParsePos pos;
+
+                js_parse_get_pos(s, &pos);
+                if (next_token(s))
+                    goto ns_fail;
+                if (token_is_ident(s->token.val))
+                    class_name = JS_DupAtom(ctx, s->token.u.ident.atom);
+                if (js_parse_seek_token(s, &pos))
+                    goto ns_fail;
+                push_scope(s);
+                if (js_parse_class(s, false, JS_PARSE_EXPORT_NONE))
+                    goto ns_fail;
+                if (class_name != JS_ATOM_NULL) {
+                    emit_op(s, OP_scope_get_var);
+                    emit_atom(s, class_name);
+                    emit_u16(s, s->cur_func->scope_level);
+                    js_emit_namespace_put_member(s, class_name);
+                    JS_FreeAtom(ctx, class_name);
+                }
+                pop_scope(s);
+                if (js_parse_expect_semi(s))
+                    return -1;
+                continue;
             }
             return js_parse_error(s, "invalid export in namespace");
         }
@@ -29448,39 +29600,101 @@ static __exception int js_parse_typescript_namespace(JSParseState *s,
     JSFunctionDef *fd = s->cur_func;
     JSAtom ns_name = JS_ATOM_NULL;
     JSAtom saved_ns = s->ts_namespace_name;
+    JSAtom path[8];
+    int path_len = 0, i;
+    int saved_path_len = s->ts_namespace_path_len;
+    JSAtom saved_path[8];
     bool nested = saved_ns != JS_ATOM_NULL;
+    bool use_temp = false;
 
     if (next_token(s))
         return -1;
-    if (s->token.val != TOK_IDENT) {
-        js_parse_error(s, "namespace name expected");
-        goto fail;
-    }
-    ns_name = JS_DupAtom(ctx, s->token.u.ident.atom);
-    if (next_token(s))
+    memcpy(saved_path, s->ts_namespace_path, sizeof(saved_path));
+    if (js_parse_typescript_qualified_name(s, path, &path_len))
         goto fail;
     if (s->token.val != '{') {
         js_parse_error(s, "expecting '{'");
         goto fail;
     }
+    use_temp = nested || path_len > 1;
+    if (use_temp) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "__ts_ns_%d", s->token.line_num);
+        ns_name = JS_NewAtom(ctx, buf);
+        if (ns_name == JS_ATOM_NULL)
+            goto fail;
+    } else {
+        ns_name = JS_DupAtom(ctx, path[0]);
+    }
     if (nested)
         push_scope(s);
-    if (js_define_var(s, ns_name, TOK_VAR))
-        goto fail;
-    if (!nested && export_flag) {
-        if (!add_export_entry(s, fd->module, ns_name, ns_name,
-                              JS_EXPORT_TYPE_LOCAL))
+    if (!nested) {
+        if (js_define_var(s, path[0], TOK_VAR))
             goto fail;
+        if (export_flag) {
+            if (!add_export_entry(s, fd->module, path[0], path[0],
+                                  JS_EXPORT_TYPE_LOCAL))
+                goto fail;
+        }
+        if (path_len == 1 && !use_temp) {
+            emit_op(s, OP_object);
+            emit_op(s, OP_scope_put_var);
+            emit_atom(s, path[0]);
+            emit_u16(s, fd->scope_level);
+        } else if (!nested) {
+            emit_op(s, OP_object);
+            emit_op(s, OP_scope_put_var);
+            emit_atom(s, path[0]);
+            emit_u16(s, fd->scope_level);
+            for (i = 1; i < path_len; i++) {
+                emit_op(s, OP_scope_get_var);
+                emit_atom(s, path[0]);
+                emit_u16(s, fd->scope_level);
+                emit_op(s, OP_object);
+                emit_op(s, OP_define_field);
+                emit_atom(s, path[i]);
+                emit_op(s, OP_drop);
+            }
+        }
+    } else {
+        emit_op(s, OP_scope_get_var);
+        emit_atom(s, saved_ns);
+        emit_u16(s, fd->scope_level);
+        emit_op(s, OP_object);
+        emit_op(s, OP_define_field);
+        emit_atom(s, path[0]);
+        emit_op(s, OP_drop);
     }
-    emit_op(s, OP_object);
-    emit_op(s, OP_scope_put_var);
-    emit_atom(s, ns_name);
-    emit_u16(s, fd->scope_level);
+    if (use_temp) {
+        if (js_define_var(s, ns_name, TOK_VAR))
+            goto fail;
+        if (nested) {
+            emit_op(s, OP_scope_get_var);
+            emit_atom(s, saved_ns);
+            emit_u16(s, fd->scope_level);
+            emit_op(s, OP_get_field);
+            emit_atom(s, path[0]);
+        } else {
+            js_emit_namespace_load_path_atoms(s, path, path_len);
+        }
+        emit_op(s, OP_scope_put_var);
+        emit_atom(s, ns_name);
+        emit_u16(s, fd->scope_level);
+    }
     if (next_token(s))
         goto fail;
-    s->ts_namespace_name = ns_name;
+    s->ts_namespace_path_len = path_len;
+    for (i = 0; i < path_len; i++)
+        s->ts_namespace_path[i] = JS_DupAtom(ctx, path[i]);
+    s->ts_namespace_name = JS_DupAtom(ctx, ns_name);
     if (js_parse_typescript_namespace_body(s))
         goto fail;
+    for (i = 0; i < s->ts_namespace_path_len; i++)
+        JS_FreeAtom(ctx, s->ts_namespace_path[i]);
+    s->ts_namespace_path_len = saved_path_len;
+    for (i = 0; i < saved_path_len; i++)
+        s->ts_namespace_path[i] = saved_path[i];
+    JS_FreeAtom(ctx, s->ts_namespace_name);
     s->ts_namespace_name = saved_ns;
     if (js_parse_expect(s, '}'))
         goto fail;
@@ -29488,14 +29702,25 @@ static __exception int js_parse_typescript_namespace(JSParseState *s,
         emit_op(s, OP_scope_get_var);
         emit_atom(s, ns_name);
         emit_u16(s, fd->scope_level);
-        s->ts_namespace_name = saved_ns;
-        js_emit_namespace_put_member(s, ns_name);
+        s->ts_namespace_name = JS_DupAtom(ctx, saved_ns);
+        js_emit_namespace_put_member(s, path[0]);
+        JS_FreeAtom(ctx, s->ts_namespace_name);
         s->ts_namespace_name = saved_ns;
         pop_scope(s);
     }
+    for (i = 0; i < path_len; i++)
+        JS_FreeAtom(ctx, path[i]);
     JS_FreeAtom(ctx, ns_name);
     return js_parse_expect_semi(s);
 fail:
+    for (i = 0; i < path_len; i++)
+        JS_FreeAtom(ctx, path[i]);
+    for (i = 0; i < s->ts_namespace_path_len; i++)
+        JS_FreeAtom(ctx, s->ts_namespace_path[i]);
+    s->ts_namespace_path_len = saved_path_len;
+    for (i = 0; i < saved_path_len; i++)
+        s->ts_namespace_path[i] = saved_path[i];
+    JS_FreeAtom(ctx, s->ts_namespace_name);
     s->ts_namespace_name = saved_ns;
     JS_FreeAtom(ctx, ns_name);
     return -1;
@@ -29730,6 +29955,8 @@ static __exception int js_parse_var(JSParseState *s, int parse_flags, int tok,
 
                     if (js_parse_assign_expr2(s, parse_flags))
                         goto var_error;
+                    if (ann_type == TS_TYPE_UNKNOWN && s->ts_typecheck)
+                        ann_type = js_parse_infer_typescript_type(s);
                     if (js_parse_check_typescript_init(s, ann_type))
                         goto var_error;
                     set_object_name(s, name);
@@ -38455,6 +38682,10 @@ static __exception int js_parse_function_decl2(JSParseState *s,
     fd->func_type = func_type;
 
     if (func_type == JS_PARSE_FUNC_CLASS_CONSTRUCTOR ||
+        func_type == JS_PARSE_FUNC_DERIVED_CLASS_CONSTRUCTOR)
+        s->ts_ctor_param_prop_count = 0;
+
+    if (func_type == JS_PARSE_FUNC_CLASS_CONSTRUCTOR ||
         func_type == JS_PARSE_FUNC_DERIVED_CLASS_CONSTRUCTOR) {
         /* error if not invoked as a constructor */
         emit_op(s, OP_check_ctor);
@@ -38502,6 +38733,7 @@ static __exception int js_parse_function_decl2(JSParseState *s,
         while (s->token.val != ')') {
             JSAtom name;
             bool rest = false;
+            bool is_param_prop = false;
             int idx, has_initializer;
 
             if (s->token.val == TOK_ELLIPSIS) {
@@ -38513,7 +38745,7 @@ static __exception int js_parse_function_decl2(JSParseState *s,
             if (s->is_typescript &&
                 (func_type == JS_PARSE_FUNC_CLASS_CONSTRUCTOR ||
                  func_type == JS_PARSE_FUNC_DERIVED_CLASS_CONSTRUCTOR)) {
-                if (js_parse_skip_typescript_modifiers(s))
+                if (js_parse_typescript_ctor_param_modifiers(s, &is_param_prop))
                     goto fail;
             }
             if (s->token.val == '[' || s->token.val == '{') {
@@ -38565,6 +38797,16 @@ static __exception int js_parse_function_decl2(JSParseState *s,
                 if (s->is_typescript && s->token.val == ':') {
                     if (js_parse_skip_typescript_type(s))
                         goto fail;
+                }
+                if (is_param_prop && !rest) {
+                    if (s->ts_ctor_param_prop_count >= 16) {
+                        js_parse_error(s, "too many constructor parameter properties");
+                        goto fail;
+                    }
+                    s->ts_ctor_param_props[s->ts_ctor_param_prop_count] =
+                        JS_DupAtom(ctx, name);
+                    s->ts_ctor_param_prop_arg_idx[s->ts_ctor_param_prop_count] = idx;
+                    s->ts_ctor_param_prop_count++;
                 }
                 if (rest) {
                     emit_op(s, OP_rest);
@@ -38692,6 +38934,9 @@ static __exception int js_parse_function_decl2(JSParseState *s,
     fd->in_function_body = true;
     push_scope(s);  /* enter body scope */
     fd->body_scope = fd->scope_level;
+
+    if (func_type == JS_PARSE_FUNC_CLASS_CONSTRUCTOR)
+        js_emit_typescript_ctor_param_props(s);
 
     if (s->is_typescript && s->token.val == ':') {
         if (js_parse_skip_typescript_type(s))
@@ -39101,6 +39346,7 @@ static JSValue __JS_EvalInternal(JSContext *ctx, JSValueConst this_obj,
     s->is_typescript = (flags & JS_EVAL_FLAG_TYPESCRIPT) != 0;
     s->ts_typecheck = (flags & JS_EVAL_FLAG_TYPECHECK) != 0;
     s->ts_namespace_name = JS_ATOM_NULL;
+    s->ts_namespace_path_len = 0;
     skip_shebang(&s->buf_ptr, s->buf_end);
 
     eval_type = flags & JS_EVAL_TYPE_MASK;

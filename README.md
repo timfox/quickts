@@ -9,10 +9,11 @@ erasable syntax in `.ts`, `.mts`, and `.cts` files.
 TypeScript support strips type annotations and type-only declarations at parse
 time. Numeric and string enums are transpiled with tsc-compatible sequential
 assignments and reverse mappings; `const enum` declarations are erased.
-Namespaces with runtime exports are lowered to object assignments. Use
+Namespaces with runtime exports are lowered to object assignments, including
+dotted names (`namespace A.B`) and `export class` inside namespaces. Use
 `qjs -t` / `qjs --typescript` to parse any file as TypeScript, and
-`qjs --typecheck` for basic primitive annotation checking against literal
-initializers.
+`qjs --typecheck` for primitive annotation checking (with basic literal
+inference when annotations are omitted).
 
 This project is a _fork_ of the [original QuickJS project] by Fabrice Bellard and Charlie Gordon, after it went dormant, with the intent of reigniting its development.
 
