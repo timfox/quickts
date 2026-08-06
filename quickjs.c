@@ -22428,6 +22428,8 @@ typedef struct JSParseState {
     bool allow_html_comments;
 } JSParseState;
 
+static bool ts_token_is(JSParseState *s, const char *word);
+
 typedef struct JSOpCode {
 #ifdef ENABLE_DUMPS // JS_DUMP_BYTECODE_*
     const char *name;
@@ -29521,7 +29523,8 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
     /* XXX: support multiple labels on loop statements */
     label_name = JS_ATOM_NULL;
     if (s->is_typescript &&
-        (s->token.val == TOK_INTERFACE || ts_token_is(s, "type") ||
+        (s->token.val == TOK_INTERFACE || ts_token_is(s, "interface") ||
+         ts_token_is(s, "type") ||
          ts_token_is(s, "declare"))) {
         return js_parse_skip_typescript_declaration(s);
     }
