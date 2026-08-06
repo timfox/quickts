@@ -1,12 +1,14 @@
 /*
- * PI computation in Javascript using the BigInt type
+ * PI computation in TypeScript using the BigInt type
  */
 "use strict";
 
+declare const scriptArgs: string[] | undefined;
+
 /* return floor(log2(a)) for a > 0 and 0 for a = 0 */
-function floor_log2(a)
+function floor_log2(a: bigint): bigint
 {
-    var k_max, a1, k, i;
+    let k_max: bigint, a1: bigint, k: bigint, i: bigint;
     k_max = 0n;
     while ((a >> (2n ** k_max)) != 0n) {
         k_max++;
@@ -24,15 +26,15 @@ function floor_log2(a)
 }
 
 /* return ceil(log2(a)) for a > 0 */
-function ceil_log2(a)
+function ceil_log2(a: bigint): bigint
 {
     return floor_log2(a - 1n) + 1n;
 }
 
 /* return floor(sqrt(a)) (not efficient but simple) */
-function int_sqrt(a)
+function int_sqrt(a: bigint): bigint
 {
-    var l, u, s;
+    let l: bigint, u: bigint, s: bigint;
     if (a == 0n)
         return a;
     l = ceil_log2(a);
@@ -48,7 +50,7 @@ function int_sqrt(a)
 }
 
 /* return pi * 2**prec */
-function calc_pi(prec) {
+function calc_pi(prec: bigint): bigint {
     const CHUD_A = 13591409n;
     const CHUD_B = 545140134n;
     const CHUD_C = 640320n;
@@ -56,8 +58,9 @@ function calc_pi(prec) {
     const CHUD_BITS_PER_TERM = 47.11041313821584202247; /* log2(C/12)*3 */
 
     /* return [P, Q, G] */
-    function chud_bs(a, b, need_G) {
-        var c, P, Q, G, P1, Q1, G1, P2, Q2, G2;
+    function chud_bs(a: bigint, b: bigint, need_G: boolean): [bigint, bigint, bigint] {
+        let c: bigint, P: bigint, Q: bigint, G: bigint;
+        let P1: bigint, Q1: bigint, G1: bigint, P2: bigint, Q2: bigint, G2: bigint;
         if (a == (b - 1n)) {
             G = (2n * b - 1n) * (6n * b - 1n) * (6n * b - 5n);
             P = G * (CHUD_B * b + CHUD_A);
@@ -78,7 +81,7 @@ function calc_pi(prec) {
         return [P, Q, G];
     }
 
-    var n, P, Q, G;
+    let n: bigint, P: bigint, Q: bigint, G: bigint;
     /* number of serie terms */
     n = BigInt(Math.ceil(Number(prec) / CHUD_BITS_PER_TERM)) + 10n;
     [P, Q, G] = chud_bs(0n, n, false);
@@ -87,8 +90,8 @@ function calc_pi(prec) {
     return (Q * G) >> prec;
 }
 
-function main(args) {
-    var r, n_digits, n_bits, out;
+function main(args: number[]): void {
+    let r: bigint, n_digits: number, n_bits: bigint, out: string;
     if (args.length < 1) {
         print("usage: pi n_digits");
         return;
@@ -104,15 +107,14 @@ function main(args) {
     print(out[0] + "." + out.slice(1));
 }
 
-var args;
+let args: number[];
 if (typeof scriptArgs != "undefined") {
-    args = scriptArgs;
-    args.shift();
+    args = scriptArgs.slice(1).map(v => v | 0);
 } else if (typeof arguments != "undefined") {
-    args = arguments;
+    args = Array.from(arguments).map(v => v | 0);
 } else {
     /* default: 1000 digits */
-    args=[1000];
+    args = [1000];
 }
 
 main(args);

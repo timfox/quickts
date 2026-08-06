@@ -902,10 +902,15 @@ JSModuleDef *js_module_load(JSContext *ctx, const char *module_name,
         return NULL;
     }
     switch (type) {
-    case JS_IMPORT_TYPE_JS:
-        val = JS_Eval(ctx, buf, buf_len, module_name,
-                      JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
+    case JS_IMPORT_TYPE_JS: {
+        int eval_flags = JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY;
+        if (js__has_suffix(module_name, ".ts") ||
+            js__has_suffix(module_name, ".mts") ||
+            js__has_suffix(module_name, ".cts"))
+            eval_flags |= JS_EVAL_FLAG_TYPESCRIPT;
+        val = JS_Eval(ctx, buf, buf_len, module_name, eval_flags);
         break;
+    }
     case JS_IMPORT_TYPE_JSON:
         val = JS_ParseJSON(ctx, buf, buf_len, module_name);
         break;

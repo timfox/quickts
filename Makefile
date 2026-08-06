@@ -77,9 +77,9 @@ codegen: $(QJSC)
 	$(QJSC) -ss -o gen/repl.c -m repl.js
 	$(QJSC) -ss -o gen/standalone.c -m standalone.js
 	$(QJSC) -e -o gen/function_source.c tests/function_source.js
-	$(QJSC) -e -o gen/hello.c examples/hello.js
-	$(QJSC) -e -o gen/hello_module.c -m examples/hello_module.js
-	$(QJSC) -e -o gen/test_fib.c -m examples/test_fib.js
+	$(QJSC) -e -o gen/hello.c examples/hello.ts
+	$(QJSC) -e -o gen/hello_module.c -m examples/hello_module.mts
+	$(QJSC) -e -o gen/test_fib.c -m examples/test_fib.mts
 	$(QJSC) -C -ss -o builtin-array-fromasync.h builtin-array-fromasync.js
 	$(QJSC) -C -ss -o builtin-iterator-zip.h builtin-iterator-zip.js
 	$(QJSC) -C -ss -o builtin-iterator-zip-keyed.h builtin-iterator-zip-keyed.js
@@ -131,6 +131,9 @@ typescript-test: $(QJS)
 	$(QJS) tests/typescript-modules.mts
 	$(QJS) tests/typescript-advanced.ts
 	$(QJS) tests/typescript-export.ts
+	$(QJS) examples/hello.ts
+	$(QJS) examples/hello_module.mts
+	$(QJS) examples/pi_bigint.ts 50
 
 test262: $(QJS)
 	$(RUN262) -m -c test262.conf -a

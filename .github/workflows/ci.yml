@@ -148,8 +148,8 @@ jobs:
         run: |
           cp build/fib.so examples/
           cp build/point.so examples/
-          ./build/qjs examples/test_fib.js
-          ./build/qjs examples/test_point.js
+          ./build/qjs examples/test_fib.mts
+          ./build/qjs examples/test_point.mts
           ./build/qjs tests/test_bjson.js
           ./build/function_source
 
@@ -161,7 +161,7 @@ jobs:
 
       - name: test standalone
         run: |
-          ./build/qjs -c examples/hello.js -o hello
+          ./build/qjs -c examples/hello.ts -o hello
           ./hello
 
       - name: test api
@@ -197,13 +197,13 @@ jobs:
         run: |
           cp build\${{matrix.config.buildType}}\fib.dll examples\
           cp build\${{matrix.config.buildType}}\point.dll examples\
-          build\${{matrix.config.buildType}}\qjs.exe examples\test_fib.js
-          build\${{matrix.config.buildType}}\qjs.exe examples\test_point.js
+          build\${{matrix.config.buildType}}\qjs.exe examples\test_fib.mts
+          build\${{matrix.config.buildType}}\qjs.exe examples\test_point.mts
           build\${{matrix.config.buildType}}\run-test262.exe -c tests.conf
           build\${{matrix.config.buildType}}\function_source.exe
       - name: test standalone
         run: |
-          build\${{matrix.config.buildType}}\qjs.exe -c examples\hello.js -o hello.exe
+          build\${{matrix.config.buildType}}\qjs.exe -c examples\hello.ts -o hello.exe
           .\hello.exe
       - name: test api
         run: |
@@ -248,8 +248,8 @@ jobs:
         run: |
           cp build\fib.dll examples\
           cp build\point.dll examples\
-          build\qjs.exe examples\test_fib.js
-          build\qjs.exe examples\test_point.js
+          build\qjs.exe examples\test_fib.mts
+          build\qjs.exe examples\test_point.mts
           build\run-test262.exe -c tests.conf
           build\function_source.exe
 
@@ -277,8 +277,8 @@ jobs:
         run: |
           cp build\${{matrix.buildType}}\fib.dll examples\
           cp build\${{matrix.buildType}}\point.dll examples\
-          build\${{matrix.buildType}}\qjs.exe examples\test_fib.js
-          build\${{matrix.buildType}}\qjs.exe examples\test_point.js
+          build\${{matrix.buildType}}\qjs.exe examples\test_fib.mts
+          build\${{matrix.buildType}}\qjs.exe examples\test_point.mts
           build\${{matrix.buildType}}\run-test262.exe -c tests.conf
           build\${{matrix.buildType}}\function_source.exe
       - name: test api
@@ -312,8 +312,8 @@ jobs:
         run: |
           cp build\fib.dll examples\
           cp build\point.dll examples\
-          build\qjs.exe examples\test_fib.js
-          build\qjs.exe examples\test_point.js
+          build\qjs.exe examples\test_fib.mts
+          build\qjs.exe examples\test_point.mts
           build\run-test262.exe -c tests.conf
           build\function_source.exe
       - name: test api
@@ -348,8 +348,8 @@ jobs:
         run: |
           cp build\${{matrix.buildType}}\fib.dll examples\
           cp build\${{matrix.buildType}}\point.dll examples\
-          build\${{matrix.buildType}}\qjs.exe examples\test_fib.js
-          build\${{matrix.buildType}}\qjs.exe examples\test_point.js
+          build\${{matrix.buildType}}\qjs.exe examples\test_fib.mts
+          build\${{matrix.buildType}}\qjs.exe examples\test_point.mts
           build\${{matrix.buildType}}\run-test262.exe -c tests.conf
           build\${{matrix.buildType}}\function_source.exe
       - name: test api
@@ -407,7 +407,7 @@ jobs:
         make test
     - name: test standalone
       run: |
-        ./build/qjs -c examples/hello.js -o hello.exe
+        ./build/qjs -c examples/hello.ts -o hello.exe
         ./hello
     - name: test api
       run: |
