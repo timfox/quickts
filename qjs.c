@@ -163,12 +163,16 @@ static int eval_file(JSContext *ctx, const char *filename, int module)
 
     if (module < 0) {
         module = (js__has_suffix(filename, ".mjs") ||
+                  js__has_suffix(filename, ".mts") ||
                   JS_DetectModule((const char *)buf, buf_len));
     }
     if (module)
         eval_flags = JS_EVAL_TYPE_MODULE;
     else
         eval_flags = JS_EVAL_TYPE_GLOBAL;
+    if (js__has_suffix(filename, ".ts") || js__has_suffix(filename, ".mts") ||
+        js__has_suffix(filename, ".cts"))
+        eval_flags |= JS_EVAL_FLAG_TYPESCRIPT;
     ret = eval_buf(ctx, buf, buf_len, filename, eval_flags);
     js_free(ctx, buf);
     return ret;

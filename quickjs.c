@@ -22424,6 +22424,7 @@ typedef struct JSParseState {
     /* current function code */
     JSFunctionDef *cur_func;
     bool is_module; /* parsing a module */
+    bool is_typescript; /* discard TypeScript's erasable syntax */
     bool allow_html_comments;
 } JSParseState;
 
@@ -27365,7 +27366,25 @@ static __exception int js_parse_postfix_expr(JSParseState *s, int parse_flags)
         JSFunctionDef *fd = s->cur_func;
         bool has_optional_chain = false;
 
-        if (s->token.val == TOK_QUESTION_MARK_DOT) {
+        if (s->is_typescript && ts_token_is(s, "as")) {
+            /* Type assertions don't affect the value on the stack. */
+            if (next_token(s))
+                return -1;
+            /* Reuse the annotation skipper by accepting an implicit colon. */
+            if (s->token.val == ':')
+                return js_parse_error(s, "type expected after 'as'");
+            for (;;) {
+                if (s->token.val == TOK_EOF)
+                    return js_parse_error(s, "type expected after 'as'");
+                if (s->token.val == ',' || s->token.val == ')' ||
+                    s->token.val == ';' || s->token.val == '}' ||
+                    s->token.val == TOK_ARROW)
+                    break;
+                if (next_token(s))
+                    return -1;
+            }
+            continue;
+        } else if (s->token.val == TOK_QUESTION_MARK_DOT) {
             /* optional chaining */
             if (next_token(s))
                 return -1;
@@ -28823,6 +28842,113 @@ static __exception int js_parse_block(JSParseState *s)
     return 0;
 }
 
+static bool ts_token_is(JSParseState *s, const char *word)
+{
+    const char *str;
+    bool result;
+
+    if (s->token.val != TOK_IDENT)
+        return false;
+    str = JS_AtomToCString(s->ctx, s->token.u.ident.atom);
+    if (!str)
+        return false;
+    result = !strcmp(str, word);
+    JS_FreeCString(s->ctx, str);
+    return result;
+}
+
+/* Skip a type annotation after its leading colon. This intentionally accepts
+   only erasable syntax: the resulting bytecode is the same as the equivalent
+   JavaScript. */
+static __exception int js_parse_skip_typescript_type(JSParseState *s)
+{
+    int paren = 0, bracket = 0, angle = 0, brace = 0;
+    bool first = true;
+
+    assert(s->token.val == ':');
+    if (next_token(s))
+        return -1;
+    for (;;) {
+        int tok = s->token.val;
+
+        if (!paren && !bracket && !angle && !brace) {
+            if (tok == ',' || tok == ')' || tok == '=' || tok == ';' ||
+                tok == TOK_ARROW || (!first && tok == '{'))
+                return 0;
+        }
+        switch (tok) {
+        case '(':
+            paren++;
+            break;
+        case ')':
+            if (paren)
+                paren--;
+            else
+                return 0;
+            break;
+        case '[':
+            bracket++;
+            break;
+        case ']':
+            if (bracket)
+                bracket--;
+            break;
+        case '<':
+            angle++;
+            break;
+        case '>':
+            if (angle)
+                angle--;
+            break;
+        case '{':
+            brace++;
+            break;
+        case '}':
+            if (brace)
+                brace--;
+            else
+                return 0;
+            break;
+        case TOK_EOF:
+            return js_parse_error(s, "unterminated TypeScript type annotation");
+        }
+        first = false;
+        if (next_token(s))
+            return -1;
+    }
+}
+
+/* Skip `interface`, `type`, and `declare` declarations, all of which are
+   type-only in the supported TypeScript subset. */
+static __exception int js_parse_skip_typescript_declaration(JSParseState *s)
+{
+    int brace = 0;
+    bool saw_brace = false;
+
+    if (next_token(s))
+        return -1;
+    for (;;) {
+        if (s->token.val == TOK_EOF)
+            return js_parse_error(s, "unterminated TypeScript declaration");
+        if (s->token.val == '{') {
+            brace++;
+            saw_brace = true;
+        } else if (s->token.val == '}') {
+            if (brace)
+                brace--;
+            if (saw_brace && !brace) {
+                if (next_token(s))
+                    return -1;
+                return 0;
+            }
+        } else if (!brace && s->token.val == ';') {
+            return next_token(s);
+        }
+        if (next_token(s))
+            return -1;
+    }
+}
+
 /* allowed parse_flags: PF_IN_ACCEPTED */
 static __exception int js_parse_var(JSParseState *s, int parse_flags, int tok,
                                     bool export_flag)
@@ -28866,6 +28992,10 @@ static __exception int js_parse_var(JSParseState *s, int parse_flags, int tok,
                     goto var_error;
             }
 
+            if (s->is_typescript && s->token.val == ':') {
+                if (js_parse_skip_typescript_type(s))
+                    goto var_error;
+            }
             if (s->token.val == '=') {
                 if (next_token(s))
                     goto var_error;
@@ -29390,6 +29520,11 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
     /* specific label handling */
     /* XXX: support multiple labels on loop statements */
     label_name = JS_ATOM_NULL;
+    if (s->is_typescript &&
+        (s->token.val == TOK_INTERFACE || ts_token_is(s, "type") ||
+         ts_token_is(s, "declare"))) {
+        return js_parse_skip_typescript_declaration(s);
+    }
     if (is_label(s)) {
         BlockEnv *be;
 
@@ -37639,6 +37774,16 @@ static __exception int js_parse_function_decl2(JSParseState *s,
                     goto fail;
                 if (next_token(s))
                     goto fail;
+                /* `x?: T` and `x: T` are both erased before the normal
+                   JavaScript parameter handling below. */
+                if (s->is_typescript && s->token.val == '?') {
+                    if (next_token(s))
+                        goto fail;
+                }
+                if (s->is_typescript && s->token.val == ':') {
+                    if (js_parse_skip_typescript_type(s))
+                        goto fail;
+                }
                 if (rest) {
                     emit_op(s, OP_rest);
                     emit_u16(s, idx);
@@ -37749,6 +37894,11 @@ static __exception int js_parse_function_decl2(JSParseState *s,
 
     if (next_token(s))
         goto fail;
+
+    if (s->is_typescript && s->token.val == ':') {
+        if (js_parse_skip_typescript_type(s))
+            goto fail;
+    }
 
     /* generator function: yield after the parameters are evaluated */
     if (func_kind == JS_FUNC_GENERATOR ||
@@ -38161,6 +38311,7 @@ static JSValue __JS_EvalInternal(JSContext *ctx, JSValueConst this_obj,
     bool is_strict_mode;
 
     js_parse_init(ctx, s, input, input_len, filename, line);
+    s->is_typescript = (flags & JS_EVAL_FLAG_TYPESCRIPT) != 0;
     skip_shebang(&s->buf_ptr, s->buf_end);
 
     eval_type = flags & JS_EVAL_TYPE_MASK;

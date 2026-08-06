@@ -248,7 +248,11 @@ JSModuleDef *jsc_module_loader(JSContext *ctx,
 
         /* compile the module */
         func_val = JS_Eval(ctx, (char *)buf, buf_len, module_name,
-                           JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
+                           JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY |
+                           (js__has_suffix(module_name, ".ts") ||
+                            js__has_suffix(module_name, ".mts") ||
+                            js__has_suffix(module_name, ".cts") ?
+                            JS_EVAL_FLAG_TYPESCRIPT : 0));
         js_free(ctx, buf);
         if (JS_IsException(func_val))
             return NULL;
@@ -285,12 +289,16 @@ static void compile_file(JSContext *ctx, FILE *fo,
     eval_flags = JS_EVAL_FLAG_COMPILE_ONLY;
     if (module < 0) {
         module = (js__has_suffix(filename, ".mjs") ||
+                  js__has_suffix(filename, ".mts") ||
                   JS_DetectModule((const char *)buf, buf_len));
     }
     if (module)
         eval_flags |= JS_EVAL_TYPE_MODULE;
     else
         eval_flags |= JS_EVAL_TYPE_GLOBAL;
+    if (js__has_suffix(filename, ".ts") || js__has_suffix(filename, ".mts") ||
+        js__has_suffix(filename, ".cts"))
+        eval_flags |= JS_EVAL_FLAG_TYPESCRIPT;
     obj = JS_Eval(ctx, (const char *)buf, buf_len, script_name ? script_name : filename, eval_flags);
     if (JS_IsException(obj)) {
         js_std_dump_error(ctx);
