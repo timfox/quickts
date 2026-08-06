@@ -129,6 +129,8 @@ typescript-test: $(QJS)
 	$(QJS) tests/typescript-erasable.ts
 	$(QJS) tests/typescript-class.ts
 	$(QJS) tests/typescript-modules.mts
+	$(QJS) tests/typescript-advanced.ts
+	$(QJS) tests/typescript-export.ts
 
 test262: $(QJS)
 	$(RUN262) -m -c test262.conf -a

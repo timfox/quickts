@@ -8,7 +8,8 @@ erasable syntax in `.ts`, `.mts`, and `.cts` files.
 
 TypeScript support discards type annotations and type-only declarations at parse
 time; it does not type-check or lower runtime TypeScript features such as enums
-and namespaces.
+and namespaces. Supported syntax includes annotations, generics, classes,
+modules, `satisfies`, `as const`, typed arrows, and constructor modifiers.
 
 This project is a _fork_ of the [original QuickJS project] by Fabrice Bellard and Charlie Gordon, after it went dormant, with the intent of reigniting its development.
 

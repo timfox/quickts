@@ -22436,6 +22436,8 @@ static __exception int js_parse_skip_typescript_declaration(JSParseState *s);
 static __exception int js_parse_skip_typescript_semi_statement(JSParseState *s);
 static __exception int js_parse_skip_typescript_implements(JSParseState *s);
 static __exception int js_parse_skip_typescript_modifiers(JSParseState *s);
+static int js_parse_peek_arrow_token(JSParseState *s, bool no_line_terminator);
+static bool js_parse_peek_typed_arrow(JSParseState *s);
 
 typedef struct JSOpCode {
 #ifdef ENABLE_DUMPS // JS_DUMP_BYTECODE_*
@@ -25205,6 +25207,79 @@ static int js_parse_skip_parens_token(JSParseState *s, int *pbits, bool no_line_
     return tok;
 }
 
+/* TypeScript-aware lookahead for `(a: T): R =>` arrow functions. */
+static int js_parse_peek_arrow_token(JSParseState *s, bool no_line_terminator)
+{
+    JSParsePos pos;
+    int tok, paren;
+
+    if (!s->is_typescript)
+        return js_parse_skip_parens_token(s, NULL, no_line_terminator);
+
+    if (s->token.val != '(')
+        return js_parse_skip_parens_token(s, NULL, no_line_terminator);
+
+    js_parse_get_pos(s, &pos);
+    if (next_token(s))
+        return -1;
+    paren = 1;
+    while (paren > 0) {
+        if (s->token.val == TOK_EOF)
+            goto fail;
+        if (s->token.val == '(')
+            paren++;
+        else if (s->token.val == ')')
+            paren--;
+        else if (paren == 1 && s->token.val == ':') {
+            if (js_parse_skip_typescript_type(s))
+                goto fail;
+            continue;
+        } else if (paren == 1 && s->token.val == '?') {
+            if (next_token(s))
+                goto fail;
+            continue;
+        }
+        if (next_token(s))
+            goto fail;
+    }
+    if (s->token.val == ':') {
+        if (js_parse_skip_typescript_type(s))
+            goto fail;
+    }
+    tok = s->token.val;
+    if (no_line_terminator && s->last_line_num != s->token.line_num)
+        tok = '\n';
+    if (js_parse_seek_token(s, &pos))
+        return -1;
+    return tok;
+ fail:
+    if (js_parse_seek_token(s, &pos))
+        return -1;
+    return -1;
+}
+
+static bool js_parse_peek_typed_arrow(JSParseState *s)
+{
+    JSParsePos pos;
+    bool res;
+
+    res = false;
+    if (!s->is_typescript || s->token.val != TOK_IDENT)
+        return false;
+    js_parse_get_pos(s, &pos);
+    if (next_token(s))
+        return false;
+    if (s->token.val == ':') {
+        if (js_parse_skip_typescript_type(s))
+            goto done;
+        res = s->token.val == TOK_ARROW;
+    }
+ done:
+    if (js_parse_seek_token(s, &pos))
+        return false;
+    return res;
+}
+
 static void set_object_name(JSParseState *s, JSAtom name)
 {
     JSFunctionDef *fd = s->cur_func;
@@ -27406,6 +27481,12 @@ static __exception int js_parse_postfix_expr(JSParseState *s, int parse_flags)
             if (next_token(s))
                 return -1;
             continue;
+        } else if (s->is_typescript && ts_token_is(s, "satisfies")) {
+            if (next_token(s))
+                return -1;
+            if (js_parse_skip_typescript_type_body(s))
+                return -1;
+            continue;
         } else if (s->is_typescript && ts_token_is(s, "as")) {
             /* Type assertions don't affect the value on the stack. */
             if (next_token(s))
@@ -28405,7 +28486,7 @@ static __exception int js_parse_assign_expr2(JSParseState *s, int parse_flags)
         }
         return 0;
     } else if (s->token.val == '(' &&
-               js_parse_skip_parens_token(s, NULL, true) == TOK_ARROW) {
+               js_parse_peek_arrow_token(s, true) == TOK_ARROW) {
         return js_parse_function_decl(s, JS_PARSE_FUNC_ARROW,
                                       JS_FUNC_NORMAL, JS_ATOM_NULL,
                                       s->token.ptr, s->token.line_num,
@@ -28427,7 +28508,7 @@ static __exception int js_parse_assign_expr2(JSParseState *s, int parse_flags)
         if (next_token(s))
             return -1;
         if ((s->token.val == '(' &&
-             js_parse_skip_parens_token(s, NULL, true) == TOK_ARROW) ||
+             js_parse_peek_arrow_token(s, true) == TOK_ARROW) ||
             (s->token.val == TOK_IDENT && !s->token.u.ident.is_reserved &&
              peek_token(s, true) == TOK_ARROW)) {
             return js_parse_function_decl(s, JS_PARSE_FUNC_ARROW,
@@ -28440,7 +28521,8 @@ static __exception int js_parse_assign_expr2(JSParseState *s, int parse_flags)
                 return -1;
         }
     } else if (s->token.val == TOK_IDENT &&
-               peek_token(s, true) == TOK_ARROW) {
+               (peek_token(s, true) == TOK_ARROW ||
+                (s->is_typescript && js_parse_peek_typed_arrow(s)))) {
         return js_parse_function_decl(s, JS_PARSE_FUNC_ARROW,
                                       JS_FUNC_NORMAL, JS_ATOM_NULL,
                                       s->token.ptr, s->token.line_num,
@@ -29624,7 +29706,7 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
     if (s->is_typescript &&
         (s->token.val == TOK_INTERFACE || ts_token_is(s, "interface") ||
          ts_token_is(s, "type") ||
-         ts_token_is(s, "declare"))) {
+         ts_token_is(s, "declare") || ts_token_is(s, "namespace"))) {
         return js_parse_skip_typescript_declaration(s);
     }
     if (is_label(s)) {
@@ -33151,6 +33233,15 @@ static __exception int js_parse_import(JSParseState *s)
                 return -1;
 
             while (s->token.val != '}') {
+                if (s->is_typescript && ts_token_is(s, "type")) {
+                    if (next_token(s))
+                        return -1;
+                    if (s->token.val == ',') {
+                        if (next_token(s))
+                            return -1;
+                    }
+                    continue;
+                }
                 if (token_is_ident(s->token.val)) {
                     import_name = JS_DupAtom(ctx, s->token.u.ident.atom);
                 } else if (s->token.val == TOK_STRING) {
@@ -37881,6 +37972,12 @@ static __exception int js_parse_function_decl2(JSParseState *s,
                 if (next_token(s))
                     goto fail;
             }
+            if (s->is_typescript &&
+                (func_type == JS_PARSE_FUNC_CLASS_CONSTRUCTOR ||
+                 func_type == JS_PARSE_FUNC_DERIVED_CLASS_CONSTRUCTOR)) {
+                if (js_parse_skip_typescript_modifiers(s))
+                    goto fail;
+            }
             if (s->token.val == '[' || s->token.val == '{') {
                 fd->has_simple_parameter_list = false;
                 if (rest) {
@@ -38057,6 +38154,11 @@ static __exception int js_parse_function_decl2(JSParseState *s,
     fd->in_function_body = true;
     push_scope(s);  /* enter body scope */
     fd->body_scope = fd->scope_level;
+
+    if (s->is_typescript && s->token.val == ':') {
+        if (js_parse_skip_typescript_type(s))
+            goto fail;
+    }
 
     if (s->token.val == TOK_ARROW) {
         if (next_token(s))
@@ -65082,6 +65184,19 @@ bool JS_DetectModule(const char *input, size_t input_len)
         // necessary because we don't pass in a module loader
         is_module = !!strstr(msg, "ReferenceError: could not load module");
         JS_FreeCString(ctx, msg);
+        if (!is_module) {
+            JS_FreeValue(ctx, val);
+            val = __JS_EvalInternal(ctx, JS_UNDEFINED, input, input_len, "<unnamed>", 1,
+                                    JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY |
+                                    JS_EVAL_FLAG_TYPESCRIPT, -1);
+            if (!JS_IsException(val)) {
+                is_module = true;
+            } else {
+                msg = JS_ToCString(ctx, rt->current_exception);
+                is_module = !!strstr(msg, "ReferenceError: could not load module");
+                JS_FreeCString(ctx, msg);
+            }
+        }
     }
     JS_FreeValue(ctx, val);
     JS_FreeContext(ctx);
