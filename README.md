@@ -10,8 +10,8 @@ TypeScript support strips type annotations and type-only declarations at parse
 time. Numeric and string enums are transpiled with tsc-compatible sequential
 assignments and reverse mappings; `const enum` declarations are erased.
 Namespaces with runtime exports are lowered to object assignments, including
-dotted names (`namespace A.B`) and `export class` inside namespaces. Use
-`qjs -t` / `qjs --typescript` to parse any file as TypeScript, and
+dotted names (`namespace A.B`), `export class` inside namespaces, and merged
+re-declarations of the same namespace. Use `qjs -t` / `qjs --typescript` to parse any file as TypeScript, and
 `qjs --typecheck` for primitive annotation checking (with basic literal
 inference when annotations are omitted).
 

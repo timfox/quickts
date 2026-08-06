@@ -22432,6 +22432,11 @@ typedef struct JSParseState {
     JSAtom ts_ctor_param_props[16]; /* TypeScript ctor parameter properties */
     uint16_t ts_ctor_param_prop_arg_idx[16];
     int ts_ctor_param_prop_count;
+    struct {
+        int len;
+        JSAtom parts[8];
+    } ts_namespace_seen[32];
+    int ts_namespace_seen_count;
     bool allow_html_comments;
 } JSParseState;
 
@@ -22459,6 +22464,7 @@ static __exception int js_parse_typescript_enum(JSParseState *s, bool export_fla
 static __exception int js_parse_typescript_namespace(JSParseState *s,
                                                      bool export_flag);
 static void js_emit_namespace_put_member(JSParseState *s, JSAtom member);
+static void js_emit_typescript_ctor_param_props(JSParseState *s);
 static TSSimpleType js_parse_peek_typescript_simple_type(JSParseState *s);
 static TSSimpleType js_parse_infer_typescript_type(JSParseState *s);
 static __exception int js_parse_check_typescript_init(JSParseState *s,
@@ -27787,6 +27793,8 @@ static __exception int js_parse_postfix_expr(JSParseState *s, int parse_flags)
                         emit_u16(s, 0);
 
                         emit_class_field_init(s);
+                        if (s->cur_func->is_derived_class_constructor)
+                            js_emit_typescript_ctor_param_props(s);
                     } else if (call_type == FUNC_CALL_NEW) {
                         /* obj func array -> func obj array */
                         emit_op(s, OP_perm3);
@@ -27831,6 +27839,8 @@ static __exception int js_parse_postfix_expr(JSParseState *s, int parse_flags)
                         emit_u16(s, 0);
 
                         emit_class_field_init(s);
+                        if (s->cur_func->is_derived_class_constructor)
+                            js_emit_typescript_ctor_param_props(s);
                     } else if (call_type == FUNC_CALL_NEW) {
                         emit_op(s, OP_call_constructor);
                         emit_u16(s, arg_count);
@@ -29354,6 +29364,39 @@ static void js_emit_namespace_load_path_atoms(JSParseState *s, JSAtom *path,
     }
 }
 
+static bool js_typescript_namespace_path_seen(JSParseState *s, JSAtom *path,
+                                              int path_len)
+{
+    int i, j;
+
+    for (i = 0; i < s->ts_namespace_seen_count; i++) {
+        if (s->ts_namespace_seen[i].len == path_len) {
+            for (j = 0; j < path_len; j++) {
+                if (s->ts_namespace_seen[i].parts[j] != path[j])
+                    goto next;
+            }
+            return true;
+        }
+    next:;
+    }
+    return false;
+}
+
+static __exception int js_typescript_namespace_path_mark(JSParseState *s,
+                                                         JSAtom *path,
+                                                         int path_len)
+{
+    int i;
+
+    if (s->ts_namespace_seen_count >= 32)
+        return js_parse_error(s, "too many namespace declarations");
+    s->ts_namespace_seen[s->ts_namespace_seen_count].len = path_len;
+    for (i = 0; i < path_len; i++)
+        s->ts_namespace_seen[s->ts_namespace_seen_count].parts[i] = path[i];
+    s->ts_namespace_seen_count++;
+    return 0;
+}
+
 static __exception int js_parse_typescript_qualified_name(JSParseState *s,
                                                           JSAtom *path,
                                                           int *plen)
@@ -29601,11 +29644,13 @@ static __exception int js_parse_typescript_namespace(JSParseState *s,
     JSAtom ns_name = JS_ATOM_NULL;
     JSAtom saved_ns = s->ts_namespace_name;
     JSAtom path[8];
-    int path_len = 0, i;
+    JSAtom full_path[8];
+    int path_len = 0, full_path_len = 0, i;
     int saved_path_len = s->ts_namespace_path_len;
     JSAtom saved_path[8];
     bool nested = saved_ns != JS_ATOM_NULL;
     bool use_temp = false;
+    bool seen;
 
     if (next_token(s))
         return -1;
@@ -29616,6 +29661,19 @@ static __exception int js_parse_typescript_namespace(JSParseState *s,
         js_parse_error(s, "expecting '{'");
         goto fail;
     }
+    full_path_len = path_len;
+    if (nested) {
+        if (saved_path_len + path_len > 8) {
+            js_parse_error(s, "namespace path too long");
+            goto fail;
+        }
+        memcpy(full_path, saved_path, saved_path_len * sizeof(JSAtom));
+        memcpy(full_path + saved_path_len, path, path_len * sizeof(JSAtom));
+        full_path_len = saved_path_len + path_len;
+    } else {
+        memcpy(full_path, path, path_len * sizeof(JSAtom));
+    }
+    seen = js_typescript_namespace_path_seen(s, full_path, full_path_len);
     use_temp = nested || path_len > 1;
     if (use_temp) {
         char buf[32];
@@ -29636,27 +29694,31 @@ static __exception int js_parse_typescript_namespace(JSParseState *s,
                                   JS_EXPORT_TYPE_LOCAL))
                 goto fail;
         }
-        if (path_len == 1 && !use_temp) {
-            emit_op(s, OP_object);
-            emit_op(s, OP_scope_put_var);
-            emit_atom(s, path[0]);
-            emit_u16(s, fd->scope_level);
-        } else if (!nested) {
-            emit_op(s, OP_object);
-            emit_op(s, OP_scope_put_var);
-            emit_atom(s, path[0]);
-            emit_u16(s, fd->scope_level);
-            for (i = 1; i < path_len; i++) {
-                emit_op(s, OP_scope_get_var);
+        if (!seen) {
+            if (path_len == 1 && !use_temp) {
+                emit_op(s, OP_object);
+                emit_op(s, OP_scope_put_var);
                 emit_atom(s, path[0]);
                 emit_u16(s, fd->scope_level);
+            } else if (!nested) {
                 emit_op(s, OP_object);
-                emit_op(s, OP_define_field);
-                emit_atom(s, path[i]);
-                emit_op(s, OP_drop);
+                emit_op(s, OP_scope_put_var);
+                emit_atom(s, path[0]);
+                emit_u16(s, fd->scope_level);
+                for (i = 1; i < path_len; i++) {
+                    emit_op(s, OP_scope_get_var);
+                    emit_atom(s, path[0]);
+                    emit_u16(s, fd->scope_level);
+                    emit_op(s, OP_object);
+                    emit_op(s, OP_define_field);
+                    emit_atom(s, path[i]);
+                    emit_op(s, OP_drop);
+                }
             }
+            if (js_typescript_namespace_path_mark(s, full_path, full_path_len))
+                goto fail;
         }
-    } else {
+    } else if (!seen) {
         emit_op(s, OP_scope_get_var);
         emit_atom(s, saved_ns);
         emit_u16(s, fd->scope_level);
@@ -29664,6 +29726,8 @@ static __exception int js_parse_typescript_namespace(JSParseState *s,
         emit_op(s, OP_define_field);
         emit_atom(s, path[0]);
         emit_op(s, OP_drop);
+        if (js_typescript_namespace_path_mark(s, full_path, full_path_len))
+            goto fail;
     }
     if (use_temp) {
         if (js_define_var(s, ns_name, TOK_VAR))

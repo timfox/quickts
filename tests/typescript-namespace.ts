@@ -15,6 +15,13 @@ namespace App.Utils {
     export const VERSION = 2;
 }
 
+namespace MergeTest {
+    export const first = 1;
+}
+namespace MergeTest {
+    export const second = 2;
+}
+
 if (MathUtils.PI !== 3.14)
     throw new Error("namespace const was not lowered");
 if (MathUtils.double(3) !== 6)
@@ -25,3 +32,5 @@ if (MathUtils.Units.Meter !== 1)
     throw new Error("nested namespace was not lowered");
 if (App.Utils.VERSION !== 2)
     throw new Error("dotted namespace was not lowered");
+if (MergeTest.first !== 1 || MergeTest.second !== 2)
+    throw new Error("namespace merge was not preserved");
