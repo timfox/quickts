@@ -22438,6 +22438,9 @@ static __exception int js_parse_skip_typescript_implements(JSParseState *s);
 static __exception int js_parse_skip_typescript_modifiers(JSParseState *s);
 static int js_parse_peek_arrow_token(JSParseState *s, bool no_line_terminator);
 static bool js_parse_peek_typed_arrow(JSParseState *s);
+static bool js_parse_peek_typescript_instantiation(JSParseState *s);
+static __exception int js_parse_typescript_enum(JSParseState *s, bool export_flag,
+                                                bool is_const);
 
 typedef struct JSOpCode {
 #ifdef ENABLE_DUMPS // JS_DUMP_BYTECODE_*
@@ -25283,6 +25286,40 @@ static bool js_parse_peek_typed_arrow(JSParseState *s)
     return !err && res;
 }
 
+/* Return true when `<` begins generic type arguments before a call or member access. */
+static bool js_parse_peek_typescript_instantiation(JSParseState *s)
+{
+    JSParsePos pos;
+    int depth;
+    bool res;
+
+    if (!s->is_typescript || s->token.val != '<')
+        return false;
+    js_parse_get_pos(s, &pos);
+    res = false;
+    if (next_token(s))
+        goto done;
+    depth = 1;
+    while (depth > 0) {
+        if (s->token.val == '<')
+            depth++;
+        else if (s->token.val == '>')
+            depth--;
+        else if (s->token.val == TOK_EOF)
+            goto done;
+        if (next_token(s))
+            goto done;
+    }
+    if (s->token.val == '(' || s->token.val == '.' ||
+        s->token.val == '[' || s->token.val == TOK_QUESTION_MARK_DOT ||
+        s->token.val == TOK_TEMPLATE)
+        res = true;
+done:
+    if (js_parse_seek_token(s, &pos))
+        return false;
+    return res;
+}
+
 static void set_object_name(JSParseState *s, JSAtom name)
 {
     JSFunctionDef *fd = s->cur_func;
@@ -27479,7 +27516,11 @@ static __exception int js_parse_postfix_expr(JSParseState *s, int parse_flags)
         JSFunctionDef *fd = s->cur_func;
         bool has_optional_chain = false;
 
-        if (s->is_typescript && s->token.val == '!') {
+        if (s->is_typescript && js_parse_peek_typescript_instantiation(s)) {
+            if (js_parse_skip_typescript_type_parameters(s))
+                return -1;
+            continue;
+        } else if (s->is_typescript && s->token.val == '!') {
             /* Postfix non-null assertions are erased. */
             if (next_token(s))
                 return -1;
@@ -29134,6 +29175,128 @@ static __exception int js_parse_skip_typescript_modifiers(JSParseState *s)
     }
 }
 
+static __exception int js_parse_skip_braced(JSParseState *s)
+{
+    int brace = 1;
+
+    assert(s->token.val == '{');
+    for (;;) {
+        if (next_token(s))
+            return -1;
+        if (s->token.val == '{')
+            brace++;
+        else if (s->token.val == '}')
+            brace--;
+        else if (s->token.val == TOK_EOF)
+            return js_parse_error(s, "unterminated block");
+        if (brace == 0)
+            return next_token(s);
+    }
+}
+
+/* Transpile numeric/string enums to a const object literal. const enums are erased. */
+static __exception int js_parse_typescript_enum(JSParseState *s, bool export_flag,
+                                                bool is_const)
+{
+    JSContext *ctx = s->ctx;
+    JSFunctionDef *fd = s->cur_func;
+    JSAtom enum_name = JS_ATOM_NULL;
+    JSAtom member_name = JS_ATOM_NULL;
+    int auto_value = 0;
+    bool has_auto = true;
+
+    if (next_token(s))
+        return -1;
+    if (s->token.val != TOK_IDENT) {
+        js_parse_error(s, "enum name expected");
+        goto fail;
+    }
+    enum_name = JS_DupAtom(ctx, s->token.u.ident.atom);
+    if (next_token(s))
+        goto fail;
+    if (s->token.val != '{') {
+        js_parse_error(s, "expecting '{'");
+        goto fail;
+    }
+    if (is_const) {
+        if (js_parse_skip_braced(s))
+            goto fail;
+        JS_FreeAtom(ctx, enum_name);
+        return js_parse_expect_semi(s);
+    }
+    if (js_define_var(s, enum_name, TOK_CONST))
+        goto fail;
+    if (export_flag) {
+        if (!add_export_entry(s, fd->module, enum_name, enum_name,
+                              JS_EXPORT_TYPE_LOCAL))
+            goto fail;
+    }
+    if (next_token(s))
+        goto fail;
+    emit_op(s, OP_object);
+    while (s->token.val != '}') {
+        if (token_is_ident(s->token.val)) {
+            member_name = JS_DupAtom(ctx, s->token.u.ident.atom);
+        } else if (s->token.val == TOK_STRING) {
+            member_name = JS_ValueToAtom(ctx, s->token.u.str.str);
+            if (member_name == JS_ATOM_NULL)
+                goto fail;
+            has_auto = false;
+        } else {
+            js_parse_error(s, "enum member name expected");
+            goto fail;
+        }
+        if (next_token(s))
+            goto fail;
+        if (s->token.val == '=') {
+            if (next_token(s))
+                goto fail;
+            if (s->token.val == TOK_NUMBER) {
+                int32_t n;
+                if (JS_ToInt32(ctx, &n, s->token.u.num.val) == 0) {
+                    auto_value = n + 1;
+                    has_auto = true;
+                } else {
+                    has_auto = false;
+                }
+            } else {
+                has_auto = false;
+            }
+            if (js_parse_assign_expr(s))
+                goto fail;
+        } else {
+            if (!has_auto) {
+                js_parse_error(s, "enum member needs initializer");
+                goto fail;
+            }
+            emit_op(s, OP_push_i32);
+            emit_u32(s, auto_value++);
+        }
+        emit_op(s, OP_define_field);
+        emit_atom(s, member_name);
+        JS_FreeAtom(ctx, member_name);
+        member_name = JS_ATOM_NULL;
+        if (s->token.val == ',') {
+            if (next_token(s))
+                goto fail;
+        } else if (s->token.val != '}') {
+            js_parse_error(s, "expecting ',' or '}'");
+            goto fail;
+        }
+    }
+    if (next_token(s))
+        goto fail;
+    emit_op(s, OP_scope_put_var_init);
+    emit_atom(s, enum_name);
+    emit_u16(s, fd->scope_level);
+    JS_FreeAtom(ctx, enum_name);
+    return js_parse_expect_semi(s);
+fail:
+    JS_FreeAtom(ctx, member_name);
+    JS_FreeAtom(ctx, enum_name);
+    return -1;
+}
+
 /* allowed parse_flags: PF_IN_ACCEPTED */
 static __exception int js_parse_var(JSParseState *s, int parse_flags, int tok,
                                     bool export_flag)
@@ -29834,6 +29997,11 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
     case TOK_VAR:
         if (next_token(s))
             goto fail;
+        if (s->is_typescript && tok == TOK_CONST && s->token.val == TOK_ENUM) {
+            if (js_parse_typescript_enum(s, false, true))
+                goto fail;
+            break;
+        }
         if (js_parse_var(s, PF_IN_ACCEPTED, tok, /*export_flag*/false))
             goto fail;
         if (js_parse_expect_semi(s))
@@ -30601,6 +30769,17 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
         break;
 
     case TOK_ENUM:
+        if (!s->is_typescript) {
+            js_unsupported_keyword(s, s->token.u.ident.atom);
+            goto fail;
+        }
+        if (!(decl_mask & DECL_MASK_OTHER)) {
+            js_parse_error(s, "enum declarations can't appear in single-statement context");
+            goto fail;
+        }
+        if (js_parse_typescript_enum(s, false, false))
+            goto fail;
+        break;
     case TOK_EXPORT:
     case TOK_EXTENDS:
         js_unsupported_keyword(s, s->token.u.ident.atom);
@@ -32946,6 +33125,14 @@ static __exception int js_parse_export(JSParseState *s)
         if (next_token(s))
             return -1;
         return js_parse_class(s, false, JS_PARSE_EXPORT_NAMED);
+    }
+    if (s->is_typescript && tok == TOK_ENUM) {
+        return js_parse_typescript_enum(s, true, false);
+    }
+    if (s->is_typescript && tok == TOK_CONST && peek_token(s, true) == TOK_ENUM) {
+        if (next_token(s))
+            return -1;
+        return js_parse_typescript_enum(s, true, true);
     }
     if (tok == TOK_CLASS) {
         return js_parse_class(s, false, JS_PARSE_EXPORT_NAMED);

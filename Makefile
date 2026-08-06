@@ -131,6 +131,8 @@ typescript-test: $(QJS)
 	$(QJS) tests/typescript-modules.mts
 	$(QJS) tests/typescript-advanced.ts
 	$(QJS) tests/typescript-export.ts
+	$(QJS) tests/typescript-enum.ts
+	$(QJS) tests/typescript-export-enum.mts
 	$(QJS) examples/hello.ts
 	$(QJS) examples/hello_module.mts
 	$(QJS) examples/pi_bigint.ts 50
