@@ -13,7 +13,7 @@ Namespaces with runtime exports are lowered to object assignments, including
 dotted names (`namespace A.B`), `export class` inside namespaces, and merged
 re-declarations of the same namespace. Use `qjs -t` / `qjs --typescript` to parse any file as TypeScript, and
 `qjs --typecheck` for primitive annotation checking (with basic literal
-inference when annotations are omitted).
+inference and variable reference checking when annotations are omitted).
 
 This project is a _fork_ of the [original QuickJS project] by Fabrice Bellard and Charlie Gordon, after it went dormant, with the intent of reigniting its development.
 

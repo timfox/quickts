@@ -22404,6 +22404,14 @@ typedef struct JSToken {
     } u;
 } JSToken;
 
+typedef enum {
+    TS_TYPE_UNKNOWN = 0,
+    TS_TYPE_NUMBER,
+    TS_TYPE_STRING,
+    TS_TYPE_BOOLEAN,
+    TS_TYPE_ANY,
+} TSSimpleType;
+
 typedef struct JSParseState {
     JSContext *ctx;
     int last_line_num;  /* line number of last token */
@@ -22437,16 +22445,17 @@ typedef struct JSParseState {
         JSAtom parts[8];
     } ts_namespace_seen[32];
     int ts_namespace_seen_count;
+    bool ts_ctor_super_called;
+    struct {
+        JSAtom name;
+        TSSimpleType type;
+        int scope_level;
+    } ts_var_types[64];
+    int ts_var_type_count;
+    int ts_var_type_scope_mark[32];
+    int ts_var_type_scope_mark_count;
     bool allow_html_comments;
 } JSParseState;
-
-typedef enum {
-    TS_TYPE_UNKNOWN = 0,
-    TS_TYPE_NUMBER,
-    TS_TYPE_STRING,
-    TS_TYPE_BOOLEAN,
-    TS_TYPE_ANY,
-} TSSimpleType;
 
 static bool ts_token_is(JSParseState *s, const char *word);
 static __exception int js_parse_skip_typescript_type_body(JSParseState *s);
@@ -22465,6 +22474,9 @@ static __exception int js_parse_typescript_namespace(JSParseState *s,
                                                      bool export_flag);
 static void js_emit_namespace_put_member(JSParseState *s, JSAtom member);
 static void js_emit_typescript_ctor_param_props(JSParseState *s);
+static void js_emit_derived_ctor_super(JSParseState *s);
+static void js_typescript_var_type_push_scope(JSParseState *s);
+static void js_typescript_var_type_pop_scope(JSParseState *s);
 static TSSimpleType js_parse_peek_typescript_simple_type(JSParseState *s);
 static TSSimpleType js_parse_infer_typescript_type(JSParseState *s);
 static __exception int js_parse_check_typescript_init(JSParseState *s,
@@ -24433,6 +24445,7 @@ static int push_scope(JSParseState *s) {
         fd->scopes[scope].using_label_end = -1;
         emit_op(s, OP_enter_scope);
         emit_u16(s, scope);
+        js_typescript_var_type_push_scope(s);
         return fd->scope_level = scope;
     }
     return 0;
@@ -24456,6 +24469,7 @@ static void pop_scope(JSParseState *s) {
         int scope = fd->scope_level;
         emit_op(s, OP_leave_scope);
         emit_u16(s, scope);
+        js_typescript_var_type_pop_scope(s);
         fd->scope_level = fd->scopes[scope].parent;
         fd->scope_first = get_first_lexical_var(fd, fd->scope_level);
     }
@@ -27793,6 +27807,7 @@ static __exception int js_parse_postfix_expr(JSParseState *s, int parse_flags)
                         emit_u16(s, 0);
 
                         emit_class_field_init(s);
+                        s->ts_ctor_super_called = true;
                         if (s->cur_func->is_derived_class_constructor)
                             js_emit_typescript_ctor_param_props(s);
                     } else if (call_type == FUNC_CALL_NEW) {
@@ -27839,6 +27854,7 @@ static __exception int js_parse_postfix_expr(JSParseState *s, int parse_flags)
                         emit_u16(s, 0);
 
                         emit_class_field_init(s);
+                        s->ts_ctor_super_called = true;
                         if (s->cur_func->is_derived_class_constructor)
                             js_emit_typescript_ctor_param_props(s);
                     } else if (call_type == FUNC_CALL_NEW) {
@@ -29248,6 +29264,78 @@ static void js_emit_typescript_ctor_param_props(JSParseState *s)
     s->ts_ctor_param_prop_count = 0;
 }
 
+static void js_typescript_var_type_push_scope(JSParseState *s)
+{
+    if (!s->ts_typecheck)
+        return;
+    if (s->ts_var_type_scope_mark_count < 32)
+        s->ts_var_type_scope_mark[s->ts_var_type_scope_mark_count++] =
+            s->ts_var_type_count;
+}
+
+static void js_typescript_var_type_pop_scope(JSParseState *s)
+{
+    if (!s->ts_typecheck)
+        return;
+    if (s->ts_var_type_scope_mark_count > 0)
+        s->ts_var_type_count =
+            s->ts_var_type_scope_mark[--s->ts_var_type_scope_mark_count];
+}
+
+static void js_typescript_record_var_type(JSParseState *s, JSAtom name,
+                                          TSSimpleType type, int scope_level)
+{
+    int i;
+
+    if (!s->ts_typecheck || type == TS_TYPE_UNKNOWN || type == TS_TYPE_ANY)
+        return;
+    for (i = s->ts_var_type_count - 1; i >= 0; i--) {
+        if (s->ts_var_types[i].name == name &&
+            s->ts_var_types[i].scope_level == scope_level) {
+            s->ts_var_types[i].type = type;
+            return;
+        }
+    }
+    if (s->ts_var_type_count >= 64)
+        return;
+    s->ts_var_types[s->ts_var_type_count].name = name;
+    s->ts_var_types[s->ts_var_type_count].type = type;
+    s->ts_var_types[s->ts_var_type_count].scope_level = scope_level;
+    s->ts_var_type_count++;
+}
+
+static TSSimpleType js_typescript_lookup_var_type(JSParseState *s, JSAtom name,
+                                                  int scope_level)
+{
+    int i;
+
+    for (i = s->ts_var_type_count - 1; i >= 0; i--) {
+        if (s->ts_var_types[i].name == name &&
+            s->ts_var_types[i].scope_level == scope_level)
+            return s->ts_var_types[i].type;
+    }
+    return TS_TYPE_UNKNOWN;
+}
+
+static void js_emit_derived_ctor_super(JSParseState *s)
+{
+    emit_op(s, OP_scope_get_var);
+    emit_atom(s, JS_ATOM_this_active_func);
+    emit_u16(s, 0);
+    emit_op(s, OP_get_super);
+    emit_op(s, OP_scope_get_var);
+    emit_atom(s, JS_ATOM_new_target);
+    emit_u16(s, 0);
+    emit_op(s, OP_call_constructor);
+    emit_u16(s, 0);
+    emit_op(s, OP_dup);
+    emit_op(s, OP_scope_put_var_init);
+    emit_atom(s, JS_ATOM_this);
+    emit_u16(s, 0);
+    emit_class_field_init(s);
+    s->ts_ctor_super_called = true;
+}
+
 static __exception int js_parse_skip_braced(JSParseState *s)
 {
     int brace = 1;
@@ -29291,6 +29379,15 @@ static TSSimpleType js_parse_infer_typescript_type(JSParseState *s)
         return TS_TYPE_UNKNOWN;
     opcode = get_prev_opcode(fd);
     switch (opcode) {
+    case OP_scope_get_var:
+        {
+            JSAtom name;
+            int scope;
+
+            name = get_u32(fd->byte_code.buf + fd->last_opcode_pos + 1);
+            scope = get_u16(fd->byte_code.buf + fd->last_opcode_pos + 5);
+            return js_typescript_lookup_var_type(s, name, scope);
+        }
     case OP_push_i32:
         return TS_TYPE_NUMBER;
     case OP_push_true:
@@ -29331,17 +29428,22 @@ static __exception int js_parse_check_typescript_init(JSParseState *s,
     actual = js_parse_infer_typescript_type(s);
     if (actual != TS_TYPE_UNKNOWN && actual != expected)
         return js_parse_error(s, "type mismatch in initializer");
+    if (actual != TS_TYPE_UNKNOWN)
+        return 0;
     switch (expected) {
     case TS_TYPE_NUMBER:
-        if (opcode != OP_push_i32 && opcode != OP_push_const)
+        if (opcode != OP_push_i32 && opcode != OP_push_const &&
+            opcode != OP_scope_get_var)
             return js_parse_error(s, "type mismatch: number expected");
         break;
     case TS_TYPE_STRING:
-        if (opcode != OP_push_atom_value && opcode != OP_push_const)
+        if (opcode != OP_push_atom_value && opcode != OP_push_const &&
+            opcode != OP_scope_get_var)
             return js_parse_error(s, "type mismatch: string expected");
         break;
     case TS_TYPE_BOOLEAN:
-        if (opcode != OP_push_true && opcode != OP_push_false)
+        if (opcode != OP_push_true && opcode != OP_push_false &&
+            opcode != OP_scope_get_var)
             return js_parse_error(s, "type mismatch: boolean expected");
         break;
     default:
@@ -30023,6 +30125,14 @@ static __exception int js_parse_var(JSParseState *s, int parse_flags, int tok,
                         ann_type = js_parse_infer_typescript_type(s);
                     if (js_parse_check_typescript_init(s, ann_type))
                         goto var_error;
+                    if (s->ts_typecheck) {
+                        TSSimpleType recorded = ann_type;
+
+                        if (recorded == TS_TYPE_UNKNOWN)
+                            recorded = js_parse_infer_typescript_type(s);
+                        js_typescript_record_var_type(s, name, recorded,
+                                                        fd->scope_level);
+                    }
                     set_object_name(s, name);
 
                     if (tok == TOK_USING) {
@@ -38749,6 +38859,9 @@ static __exception int js_parse_function_decl2(JSParseState *s,
         func_type == JS_PARSE_FUNC_DERIVED_CLASS_CONSTRUCTOR)
         s->ts_ctor_param_prop_count = 0;
 
+    if (func_type == JS_PARSE_FUNC_DERIVED_CLASS_CONSTRUCTOR)
+        s->ts_ctor_super_called = false;
+
     if (func_type == JS_PARSE_FUNC_CLASS_CONSTRUCTOR ||
         func_type == JS_PARSE_FUNC_DERIVED_CLASS_CONSTRUCTOR) {
         /* error if not invoked as a constructor */
@@ -39039,6 +39152,12 @@ static __exception int js_parse_function_decl2(JSParseState *s,
     if (func_type != JS_PARSE_FUNC_CLASS_STATIC_INIT)
         if (js_parse_expect(s, '{'))
             goto fail;
+
+    if (func_type == JS_PARSE_FUNC_DERIVED_CLASS_CONSTRUCTOR &&
+        s->token.val == '}') {
+        js_emit_derived_ctor_super(s);
+        js_emit_typescript_ctor_param_props(s);
+    }
 
     if (js_parse_directives(s))
         goto fail;
