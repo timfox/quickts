@@ -22429,6 +22429,7 @@ typedef struct JSParseState {
 } JSParseState;
 
 static bool ts_token_is(JSParseState *s, const char *word);
+static __exception int js_parse_skip_typescript_type_body(JSParseState *s);
 
 typedef struct JSOpCode {
 #ifdef ENABLE_DUMPS // JS_DUMP_BYTECODE_*
@@ -27368,23 +27369,19 @@ static __exception int js_parse_postfix_expr(JSParseState *s, int parse_flags)
         JSFunctionDef *fd = s->cur_func;
         bool has_optional_chain = false;
 
-        if (s->is_typescript && ts_token_is(s, "as")) {
+        if (s->is_typescript && s->token.val == '!') {
+            /* Postfix non-null assertions are erased. */
+            if (next_token(s))
+                return -1;
+            continue;
+        } else if (s->is_typescript && ts_token_is(s, "as")) {
             /* Type assertions don't affect the value on the stack. */
             if (next_token(s))
                 return -1;
-            /* Reuse the annotation skipper by accepting an implicit colon. */
-            if (s->token.val == ':')
+            if (s->token.val == ':' || s->token.val == TOK_EOF)
                 return js_parse_error(s, "type expected after 'as'");
-            for (;;) {
-                if (s->token.val == TOK_EOF)
-                    return js_parse_error(s, "type expected after 'as'");
-                if (s->token.val == ',' || s->token.val == ')' ||
-                    s->token.val == ';' || s->token.val == '}' ||
-                    s->token.val == TOK_ARROW)
-                    break;
-                if (next_token(s))
-                    return -1;
-            }
+            if (js_parse_skip_typescript_type_body(s))
+                return -1;
             continue;
         } else if (s->token.val == TOK_QUESTION_MARK_DOT) {
             /* optional chaining */
@@ -28862,25 +28859,28 @@ static bool ts_token_is(JSParseState *s, const char *word)
 /* Skip a type annotation after its leading colon. This intentionally accepts
    only erasable syntax: the resulting bytecode is the same as the equivalent
    JavaScript. */
-static __exception int js_parse_skip_typescript_type(JSParseState *s)
+static __exception int js_parse_skip_typescript_type_body(JSParseState *s)
 {
     int paren = 0, bracket = 0, angle = 0, brace = 0;
     bool first = true;
+    bool function_type = false;
 
-    assert(s->token.val == ':');
-    if (next_token(s))
-        return -1;
     for (;;) {
         int tok = s->token.val;
 
         if (!paren && !bracket && !angle && !brace) {
             if (tok == ',' || tok == ')' || tok == '=' || tok == ';' ||
-                tok == TOK_ARROW || (!first && tok == '{'))
+                (tok == TOK_ARROW && !function_type) ||
+                (!first && tok == '{') || tok == ']' || tok == '}' ||
+                tok == '+' || tok == '-' || tok == '*' || tok == '/' ||
+                tok == '%' || tok == '&' || tok == '|')
                 return 0;
         }
         switch (tok) {
         case '(':
             paren++;
+            if (first)
+                function_type = true;
             break;
         case ')':
             if (paren)
@@ -28918,6 +28918,33 @@ static __exception int js_parse_skip_typescript_type(JSParseState *s)
         if (next_token(s))
             return -1;
     }
+}
+
+static __exception int js_parse_skip_typescript_type(JSParseState *s)
+{
+    assert(s->token.val == ':');
+    if (next_token(s))
+        return -1;
+    return js_parse_skip_typescript_type_body(s);
+}
+
+/* Generic parameters in declarations are unambiguously TypeScript syntax. */
+static __exception int js_parse_skip_typescript_type_parameters(JSParseState *s)
+{
+    int depth = 0;
+
+    assert(s->token.val == '<');
+    do {
+        if (s->token.val == '<')
+            depth++;
+        else if (s->token.val == '>' && --depth == 0)
+            return next_token(s);
+        else if (s->token.val == TOK_EOF)
+            return js_parse_error(s, "unterminated TypeScript type parameters");
+        if (next_token(s))
+            return -1;
+    } while (depth);
+    return 0;
 }
 
 /* Skip `interface`, `type`, and `declare` declarations, all of which are
@@ -37581,6 +37608,11 @@ static __exception int js_parse_function_decl2(JSParseState *s,
         }
     } else if (func_type != JS_PARSE_FUNC_ARROW) {
         func_name = JS_DupAtom(ctx, func_name);
+    }
+
+    if (s->is_typescript && s->token.val == '<') {
+        if (js_parse_skip_typescript_type_parameters(s))
+            goto fail;
     }
 
     if (fd->is_eval && fd->eval_type == JS_EVAL_TYPE_MODULE &&
