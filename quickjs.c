@@ -25211,7 +25211,7 @@ static int js_parse_skip_parens_token(JSParseState *s, int *pbits, bool no_line_
 static int js_parse_peek_arrow_token(JSParseState *s, bool no_line_terminator)
 {
     JSParsePos pos;
-    int tok, paren;
+    int tok, paren, err;
 
     if (!s->is_typescript)
         return js_parse_skip_parens_token(s, NULL, no_line_terminator);
@@ -25220,64 +25220,67 @@ static int js_parse_peek_arrow_token(JSParseState *s, bool no_line_terminator)
         return js_parse_skip_parens_token(s, NULL, no_line_terminator);
 
     js_parse_get_pos(s, &pos);
-    if (next_token(s))
-        return -1;
-    paren = 1;
-    while (paren > 0) {
-        if (s->token.val == TOK_EOF)
-            goto fail;
-        if (s->token.val == '(')
-            paren++;
-        else if (s->token.val == ')')
-            paren--;
-        else if (paren == 1 && s->token.val == ':') {
-            if (js_parse_skip_typescript_type(s))
-                goto fail;
-            continue;
-        } else if (paren == 1 && s->token.val == '?') {
-            if (next_token(s))
-                goto fail;
-            continue;
+    err = 0;
+    tok = -1;
+    if (next_token(s)) {
+        err = 1;
+    } else {
+        paren = 1;
+        while (!err && paren > 0) {
+            if (s->token.val == TOK_EOF) {
+                err = 1;
+                break;
+            }
+            if (s->token.val == '(') {
+                paren++;
+            } else if (s->token.val == ')') {
+                paren--;
+            } else if (paren == 1 && s->token.val == ':') {
+                if (js_parse_skip_typescript_type(s))
+                    err = 1;
+                continue;
+            } else if (paren == 1 && s->token.val == '?') {
+                if (next_token(s))
+                    err = 1;
+                continue;
+            }
+            if (!err && next_token(s))
+                err = 1;
         }
-        if (next_token(s))
-            goto fail;
+        if (!err && s->token.val == ':') {
+            if (js_parse_skip_typescript_type(s))
+                err = 1;
+        }
+        if (!err) {
+            tok = s->token.val;
+            if (no_line_terminator && s->last_line_num != s->token.line_num)
+                tok = '\n';
+        }
     }
-    if (s->token.val == ':') {
-        if (js_parse_skip_typescript_type(s))
-            goto fail;
-    }
-    tok = s->token.val;
-    if (no_line_terminator && s->last_line_num != s->token.line_num)
-        tok = '\n';
     if (js_parse_seek_token(s, &pos))
         return -1;
-    return tok;
- fail:
-    if (js_parse_seek_token(s, &pos))
-        return -1;
-    return -1;
+    return err ? -1 : tok;
 }
 
 static bool js_parse_peek_typed_arrow(JSParseState *s)
 {
     JSParsePos pos;
     bool res;
+    int err;
 
-    res = false;
     if (!s->is_typescript || s->token.val != TOK_IDENT)
         return false;
     js_parse_get_pos(s, &pos);
-    if (next_token(s))
-        return false;
-    if (s->token.val == ':') {
-        if (js_parse_skip_typescript_type(s))
-            goto done;
-        res = s->token.val == TOK_ARROW;
+    res = false;
+    err = next_token(s);
+    if (!err && s->token.val == ':') {
+        err = js_parse_skip_typescript_type(s);
+        if (!err)
+            res = s->token.val == TOK_ARROW;
     }
- done:
     if (js_parse_seek_token(s, &pos))
         return false;
-    return res;
+    return !err && res;
 }
 
 static void set_object_name(JSParseState *s, JSAtom name)
