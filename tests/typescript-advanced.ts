@@ -22,7 +22,7 @@ class Account {
     }
 }
 
-// namespace declarations are erased
+// namespace declarations are lowered to runtime objects
 namespace MathUtils {
     export const PI = 3.14;
 }
@@ -37,3 +37,5 @@ if (first !== "hello" || second !== 42)
     throw new Error("generic call sites were not erased");
 if (new Account("alice", 10).owner !== "alice")
     throw new Error("constructor parameter properties were not erased");
+if (MathUtils.PI !== 3.14)
+    throw new Error("namespace was not lowered");

@@ -6,12 +6,13 @@ QuickTS is a small and embeddable TypeScript engine based on QuickJS-NG. It aims
 to support the latest [ECMAScript] specification and TypeScript, including
 erasable syntax in `.ts`, `.mts`, and `.cts` files.
 
-TypeScript support discards type annotations and type-only declarations at parse
-time; it does not type-check code. Numeric and string enums are transpiled to
-const objects; `const enum` declarations are erased. Supported syntax includes
-annotations, generics (including call-site type arguments), classes, modules,
-`satisfies`, `as const`, typed arrows, and constructor modifiers. Use
-`qjs -t` / `qjs --typescript` to parse any file as TypeScript.
+TypeScript support strips type annotations and type-only declarations at parse
+time. Numeric and string enums are transpiled with tsc-compatible sequential
+assignments and reverse mappings; `const enum` declarations are erased.
+Namespaces with runtime exports are lowered to object assignments. Use
+`qjs -t` / `qjs --typescript` to parse any file as TypeScript, and
+`qjs --typecheck` for basic primitive annotation checking against literal
+initializers.
 
 This project is a _fork_ of the [original QuickJS project] by Fabrice Bellard and Charlie Gordon, after it went dormant, with the intent of reigniting its development.
 
