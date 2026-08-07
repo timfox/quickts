@@ -15,6 +15,24 @@ re-declarations of the same namespace. Use `qjs -t` / `qjs --typescript` to pars
 `qjs --typecheck` for primitive annotation checking (with basic literal
 inference and variable reference checking when annotations are omitted).
 
+### Examples
+
+Runnable TypeScript examples live in `examples/`:
+
+| File | Demonstrates |
+|------|--------------|
+| `hello.ts` | Basic `.ts` script |
+| `hello_module.mts` | ES module import |
+| `quickts_showcase.ts` | Enums, namespaces, classes, generics, modules |
+| `enum_status.ts` | Numeric/string/`const` enums, reverse mappings |
+| `geometry.ts` | Namespaces, nested/dotted namespaces, merge, classes |
+| `classes_demo.ts` | Interfaces, abstract classes, parameter properties |
+| `advanced_syntax.ts` | `satisfies`, `as const`, typed arrows, generics |
+| `inventory.mts` / `inventory_runner.mts` | Exported enum + class module |
+| `pi_bigint.ts` | BigInt types and `declare` erasure |
+
+Run an example: `build/qjs examples/quickts_showcase.ts`
+
 This project is a _fork_ of the [original QuickJS project] by Fabrice Bellard and Charlie Gordon, after it went dormant, with the intent of reigniting its development.
 
 ## Getting started

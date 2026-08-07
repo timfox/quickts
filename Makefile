@@ -142,6 +142,13 @@ typescript-test: $(QJS)
 	$(QJS) examples/hello.ts
 	$(QJS) examples/hello_module.mts
 	$(QJS) examples/pi_bigint.ts 50
+	$(QJS) examples/enum_status.ts
+	$(QJS) examples/geometry.ts
+	$(QJS) examples/classes_demo.ts
+	$(QJS) examples/advanced_syntax.ts
+	$(QJS) examples/inventory_runner.mts
+	$(QJS) examples/quickts_showcase.ts
+	$(QJS) --typecheck examples/quickts_showcase.ts
 
 test262: $(QJS)
 	$(RUN262) -m -c test262.conf -a
