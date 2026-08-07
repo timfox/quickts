@@ -111,7 +111,7 @@ options are:
 ```
 
 Here is an example on how to create a standalone executable that embeds QuickJS
-and the `examples/hello.js` JavaScript file:
+and the `examples/hello.ts` TypeScript file:
 
 ```bash
 # Make sure you are in the QuickJS source directory.

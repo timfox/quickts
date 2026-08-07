@@ -55,6 +55,8 @@ extern const uint32_t qjsc_standalone_size;
 
 static int qjs__argc;
 static char **qjs__argv;
+static int qjs__force_typescript;
+static int qjs__typecheck;
 
 // Must match standalone.js
 #define TRAILER_SIZE 12
@@ -163,12 +165,18 @@ static int eval_file(JSContext *ctx, const char *filename, int module)
 
     if (module < 0) {
         module = (js__has_suffix(filename, ".mjs") ||
+                  js__has_suffix(filename, ".mts") ||
                   JS_DetectModule((const char *)buf, buf_len));
     }
     if (module)
         eval_flags = JS_EVAL_TYPE_MODULE;
     else
         eval_flags = JS_EVAL_TYPE_GLOBAL;
+    if (qjs__force_typescript || js__has_suffix(filename, ".ts") ||
+        js__has_suffix(filename, ".mts") || js__has_suffix(filename, ".cts"))
+        eval_flags |= JS_EVAL_FLAG_TYPESCRIPT;
+    if (qjs__typecheck)
+        eval_flags |= JS_EVAL_FLAG_TYPECHECK | JS_EVAL_FLAG_TYPESCRIPT;
     ret = eval_buf(ctx, buf, buf_len, filename, eval_flags);
     js_free(ctx, buf);
     return ret;
@@ -389,6 +397,8 @@ void help(int exit_status)
            "-i  --interactive  go to interactive mode\n"
            "-C  --script       load as JS classic script (default=autodetect)\n"
            "-m  --module       load as ES module (default=autodetect)\n"
+           "-t  --typescript   parse input as TypeScript\n"
+           "    --typecheck    check primitive type annotations (requires TypeScript)\n"
            "-I  --include file include an additional file\n"
            "    --std          make 'std', 'os' and 'bjson' available to script\n"
            "-T  --trace        trace memory allocation\n"
@@ -510,6 +520,14 @@ int main(int argc, char **argv)
             }
             if (opt == 'm' || !strcmp(longopt, "module")) {
                 module = 1;
+                continue;
+            }
+            if (opt == 't' || !strcmp(longopt, "typescript")) {
+                qjs__force_typescript = 1;
+                continue;
+            }
+            if (!strcmp(longopt, "typecheck")) {
+                qjs__typecheck = 1;
                 continue;
             }
             if (opt == 'C' || !strcmp(longopt, "script")) {
@@ -689,6 +707,10 @@ start:
             JS_FreeValue(ctx, args[2]);
         } else if (expr) {
             int flags = module ? JS_EVAL_TYPE_MODULE : 0;
+            if (qjs__force_typescript)
+                flags |= JS_EVAL_FLAG_TYPESCRIPT;
+            if (qjs__typecheck)
+                flags |= JS_EVAL_FLAG_TYPECHECK | JS_EVAL_FLAG_TYPESCRIPT;
             if (eval_buf(ctx, expr, strlen(expr), "<cmdline>", flags))
                 goto fail;
         } else if (optind >= argc) {

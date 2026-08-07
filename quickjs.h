@@ -461,6 +461,13 @@ static inline bool JS_VALUE_IS_NAN(JSValue v)
 /* allow top-level await in normal script. JS_Eval() returns a
    promise. Only allowed with JS_EVAL_TYPE_GLOBAL */
 #define JS_EVAL_FLAG_ASYNC (1 << 7)
+/* Parse TypeScript syntax: erasable types are stripped; enums and namespaces
+   are lowered to JavaScript. Combine with JS_EVAL_FLAG_TYPECHECK for basic
+   primitive annotation checking at compile time. */
+#define JS_EVAL_FLAG_TYPESCRIPT (1 << 8)
+/* Check simple primitive type annotations (number, string, boolean) against
+   literal initializers. Requires JS_EVAL_FLAG_TYPESCRIPT. */
+#define JS_EVAL_FLAG_TYPECHECK (1 << 9)
 
 typedef JSValue JSCFunction(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
 typedef JSValue JSCFunctionMagic(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv, int magic);

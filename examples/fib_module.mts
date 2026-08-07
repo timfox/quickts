@@ -1,5 +1,5 @@
 /* fib module */
-export function fib(n)
+export function fib(n: number): number
 {
     if (n <= 0)
         return 0;
