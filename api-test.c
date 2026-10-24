@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "quickjs.h"
+#include "quickjs-libc.h"
 #include "cutils.h"
 
 static JSRuntime *new_runtime(void)
@@ -172,12 +173,10 @@ static void cfunctions(void)
 
 #define MAX_TIME 10
 
-static int timeout_interrupt_handler(JSRuntime *rt, void *opaque)
+static int timeout_interrupt_handler(JSContext *ctx, void *opaque)
 {
     int *time = (int *)opaque;
-    if (*time <= MAX_TIME)
-        *time += 1;
-    return *time > MAX_TIME;
+    return (*time)++ > MAX_TIME;
 }
 
 static void sync_call(void)
@@ -234,6 +233,38 @@ static void async_call(void)
     JSValue e = JS_GetException(ctx);
     assert(JS_IsUncatchableError(e));
     JS_FreeValue(ctx, e);
+    JS_FreeContext(ctx);
+    JS_FreeRuntime(rt);
+}
+
+static void std_eval_interrupt_handler(void)
+{
+    static const char code[] =
+        "import * as std from 'std'; std.evalScript('for(;;){}')";
+    JSRuntime *rt = new_runtime();
+    js_std_init_handlers(rt);
+    JSContext *ctx = JS_NewContext(rt);
+    js_init_module_std(ctx, "std");
+    int time = 0;
+    JS_SetInterruptHandler(rt, timeout_interrupt_handler, &time);
+    JSValue ret =
+        JS_Eval(ctx, code, strlen(code), "<input>", JS_EVAL_TYPE_MODULE);
+    ret = js_std_await(ctx, ret);
+    assert(time > MAX_TIME);
+    assert(JS_IsException(ret));
+    ret = JS_GetException(ctx);
+    assert(JS_IsError(ret));
+    // uncatchable "interrupted" exception is turned into a regular exception
+    assert(!JS_IsUncatchableError(ret));
+    const char *str = JS_ToCString(ctx, ret);
+    assert(str != NULL);
+    assert(strstr(str, "InternalError: interrupted"));
+    JS_FreeCString(ctx, str);
+    JS_FreeValue(ctx, ret);
+    uintptr_t interrupt_handler = js_std_cmd(/*GetInterruptHandler*/5, rt);
+    uintptr_t interrupt_opaque = js_std_cmd(/*GetInterruptOpaque*/6, rt);
+    assert(interrupt_handler == (uintptr_t)timeout_interrupt_handler);
+    assert(interrupt_opaque == (uintptr_t)&time);
     JS_FreeContext(ctx);
     JS_FreeRuntime(rt);
 }
@@ -650,6 +681,19 @@ static void utf16_string(void)
         JS_FreeCString(ctx, s);
         JS_FreeValue(ctx, e);
     }
+    {
+        // create wide char slice string, see JS_STRING_SLICE_LEN_MAX
+        JSValue v = eval(ctx, "`\\uD800\\uDC00`.repeat(8192).slice(0, -1)");
+        assert(!JS_IsException(v));
+        size_t n;
+        const uint16_t *u = JS_ToCStringLenUTF16(ctx, &n, v);
+        assert(u);
+        assert(n == 2*8192-1);
+        assert(u[0] == 0xD800);
+        assert(u[1] == 0xDC00);
+        JS_FreeCStringUTF16(ctx, u);
+        JS_FreeValue(ctx, v);
+    }
     JS_FreeContext(ctx);
     JS_FreeRuntime(rt);
 }
@@ -1015,6 +1059,53 @@ static void backtrace_oom_callsite_array(void)
 
     JS_FreeValue(ctx, func);
     JS_FreeValue(ctx, global_object);
+    JS_FreeContext(ctx);
+    JS_FreeRuntime(rt);
+}
+
+static void large_allocation_accounting(void)
+{
+    static const size_t block_size = 1024 * 1024;
+    JSMemoryUsage before, after;
+    JSValue ret, exception;
+    JSRuntime *rt;
+    JSContext *ctx;
+    const char *str;
+
+    rt = new_runtime();
+    ctx = JS_NewContext(rt);
+
+    JS_ComputeMemoryUsage(rt, &before);
+    ret = eval(ctx, "globalThis.a = new Uint8Array(1024 * 1024)");
+    assert(!JS_IsException(ret));
+    JS_FreeValue(ctx, ret);
+    JS_ComputeMemoryUsage(rt, &after);
+    assert(after.malloc_size - before.malloc_size >= (int64_t)block_size);
+
+    JS_ComputeMemoryUsage(rt, &before);
+    JS_SetMemoryLimit(rt, (size_t)before.malloc_size + 4 * block_size);
+    ret = eval(ctx, "globalThis.a = [];\n"
+                    "for (let i = 0; i < 64; i++) {\n"
+                    "    // OOM exception should be uncatchable\n"
+                    "    try {\n"
+                    "        a.push(new Uint8Array(1024 * 1024));"
+                    "    } catch (e) {\n"
+                    "        throw 'unexpected exception';\n"
+                    "    }\n"
+                    "}");
+    assert(JS_IsException(ret));
+    JS_SetMemoryLimit(rt, 0);
+    JS_ComputeMemoryUsage(rt, &after);
+    assert(after.malloc_size - before.malloc_size < (int64_t)(8 * block_size));
+
+    exception = JS_GetException(ctx);
+    assert(JS_IsError(exception));
+    str = JS_ToCString(ctx, exception);
+    assert(str);
+    assert(!strcmp(str, "InternalError: out of memory"));
+    JS_FreeCString(ctx, str);
+    JS_FreeValue(ctx, exception);
+
     JS_FreeContext(ctx);
     JS_FreeRuntime(rt);
 }
@@ -2052,6 +2143,136 @@ void add_intrinsic_bigint(void)
     JS_FreeRuntime(rt);
 }
 
+void new_typed_array(void)
+{
+    JSValueConst argv[4];
+    JSRuntime *rt = new_runtime();
+    JSContext *ctx = JS_NewContext(rt);
+    uint8_t *buf = js_malloc(ctx, 8);
+    JSValue ab = JS_NewArrayBuffer(ctx, buf, 8, /*max_len*/0, NULL, NULL, false);
+    assert(JS_IsArrayBuffer(ab));
+    for (int argc = 0; argc < (int)countof(argv); argc++) {
+        JSValue ret = JS_NewTypedArray(ctx, argc, argv, JS_TYPED_ARRAY_UINT8);
+        assert(!JS_IsException(ret));
+        assert(JS_IsObject(ret));
+        JS_FreeValue(ctx, ret);
+        argv[argc] = JS_UNDEFINED;
+        argv[0] = ab;
+    }
+    JS_FreeValue(ctx, ab);
+    js_free(ctx, buf);
+    JS_FreeContext(ctx);
+    JS_FreeRuntime(rt);
+}
+
+void private_symbols(void)
+{
+    JSRuntime *rt = new_runtime();
+    JSContext *ctx = JS_NewContext(rt);
+    JSValue pub = JS_NewSymbol(ctx, "public", /*is_global*/false);
+    JSValue priv = JS_NewPrivateSymbol(ctx, "private");
+    assert(JS_IsSymbol(pub));
+    assert(JS_IsSymbol(priv));
+    JSValue obj = JS_NewObject(ctx);
+    assert(JS_IsObject(obj));
+    assert(true == JS_SetPropertyValue(ctx, obj, pub, JS_TRUE, JS_PROP_C_W_E));
+    assert(true == JS_SetPropertyValue(ctx, obj, priv, JS_FALSE, JS_PROP_C_W_E));
+    JSValue global_object = JS_GetGlobalObject(ctx);
+    assert(true == JS_SetPropertyStr(ctx, global_object, "o", JS_DupValue(ctx, obj)));
+    JS_FreeValue(ctx, global_object);
+    JSValue result = eval(ctx, "Object.getOwnPropertySymbols(o)");
+    assert(JS_IsArray(result));
+    int64_t length = -1;
+    assert(0 == JS_GetLength(ctx, result, &length));
+    assert(length == 1);
+    JSValue item = JS_GetPropertyUint32(ctx, result, 0);
+    assert(JS_IsSymbol(item));
+    assert(JS_IsSameValue(ctx, item, pub));
+    JS_FreeValue(ctx, item);
+    JS_FreeValue(ctx, result);
+    result = JS_GetPropertyValue(ctx, obj, JS_DupValue(ctx, pub));
+    assert(JS_IsBool(result));
+    assert(JS_IsSameValue(ctx, result, JS_TRUE));
+    result = JS_GetPropertyValue(ctx, obj, JS_DupValue(ctx, priv));
+    assert(JS_IsBool(result));
+    assert(JS_IsSameValue(ctx, result, JS_FALSE));
+    JS_FreeValue(ctx, obj);
+    JS_FreeContext(ctx);
+    JS_FreeRuntime(rt);
+}
+
+// https://github.com/quickjs-ng/quickjs/issues/1181
+// JS_NewContext() must fail cleanly, not crash or leak, whichever of its
+// allocations runs out of memory.
+static void new_context_low_memory(void)
+{
+    JSMemoryUsage stats;
+    size_t base, headroom;
+    JSRuntime *rt;
+    JSContext *ctx;
+    int all, ok;
+
+    all = ok = 0;
+    rt = new_runtime();
+    JS_ComputeMemoryUsage(rt, &stats);
+    base = (size_t)stats.malloc_size;
+    // Small steps first, so that each of the first allocations gets its turn
+    // to fail, then bigger ones until a few contexts fit.
+    for (headroom = 0; ok < 4 && headroom < 4 * 1024 * 1024;
+         headroom += headroom < 8192 ? 8 : 1024) {
+        JS_SetMemoryLimit(rt, base + headroom);
+        ctx = JS_NewContext(rt); // expected to fail, not to crash
+        if (ctx) {
+            JS_FreeContext(ctx);
+            ok++;
+        }
+        all++;
+    }
+    JS_SetMemoryLimit(rt, 0);
+    JS_FreeRuntime(rt);
+    assert(ok > 0);     // expect some successes...
+    assert(ok < all);   // ...but not all
+}
+
+// running out of memory in JSON.stringify must not leak the array element
+// that was being converted
+static void json_stringify_oom(void)
+{
+    static const char setup_code[] =
+        "globalThis.f = () => JSON.stringify([{}]);\n"
+        "f();\n"; // JSON.stringify is set up on first access, do it now
+    JSValue global_object, func, ret;
+    JSMemoryUsage stats;
+    uint32_t headroom;
+    JSRuntime *rt;
+    JSContext *ctx;
+
+    rt = new_runtime();
+    ctx = JS_NewContext(rt);
+    global_object = JS_GetGlobalObject(ctx);
+
+    ret = eval(ctx, setup_code);
+    assert(!JS_IsException(ret));
+    JS_FreeValue(ctx, ret);
+
+    func = JS_GetPropertyStr(ctx, global_object, "f");
+    assert(JS_IsFunction(ctx, func));
+
+    for (headroom = 0; headroom < 2048; headroom++) {
+        JS_ComputeMemoryUsage(rt, &stats);
+        JS_SetMemoryLimit(rt, (size_t)stats.malloc_size + headroom);
+        ret = JS_Call(ctx, func, JS_UNDEFINED, 0, NULL);
+        JS_SetMemoryLimit(rt, 0);
+        JS_FreeValue(ctx, ret);
+        JS_FreeValue(ctx, JS_GetException(ctx));
+    }
+
+    JS_FreeValue(ctx, func);
+    JS_FreeValue(ctx, global_object);
+    JS_FreeContext(ctx);
+    JS_FreeRuntime(rt);
+}
+
 int main(void)
 {
     cfunctions();
@@ -2071,6 +2292,7 @@ int main(void)
     dump_memory_usage();
     new_errors();
     dom_exception_added_twice();
+    large_allocation_accounting();
     backtrace_oom_current_exception();
     backtrace_oom_callsite_array();
     proxy_own_keys_huge_length();
@@ -2089,5 +2311,10 @@ int main(void)
     get_class_name();
     object_from();
     add_intrinsic_bigint();
+    new_typed_array();
+    std_eval_interrupt_handler();
+    private_symbols();
+    new_context_low_memory();
+    json_stringify_oom();
     return 0;
 }

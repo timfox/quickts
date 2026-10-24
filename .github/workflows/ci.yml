@@ -61,11 +61,11 @@ jobs:
           - { os: ubuntu-latest, arch: x86, runTest262: true }
           - { os: ubuntu-latest, arch: riscv64 }
 
-          - { os: macos-14, configType: Debug }
-          - { os: macos-14, configType: Release }
-          - { os: macos-14, configType: examples }
-          - { os: macos-14, configType: shared }
-          - { os: macos-14, configType: asan+ubsan, runTest262: true }
+          - { os: macos-15, configType: Debug }
+          - { os: macos-15, configType: Release }
+          - { os: macos-15, configType: examples }
+          - { os: macos-15, configType: shared }
+          - { os: macos-15, configType: asan+ubsan, runTest262: true }
     steps:
       - uses: actions/checkout@v7
         with:
@@ -93,10 +93,11 @@ jobs:
 
       - name: Setup Alpine
         if: ${{ matrix.config.arch != '' }}
-        uses: jirutka/setup-alpine@v1
+        uses: quickjs-ng/setup-alpine@master
         with:
           arch: ${{ matrix.config.arch }}
           packages: "build-base make cmake git"
+          apk-tools-url: https://raw.githubusercontent.com/quickjs-ng/apk-for-ci/refs/heads/master/apk.static#!sha256!34bb1a96f0258982377a289392d4ea9f3f4b767a4bb5806b1b87179b79ad8a1c
 
       - name: uname
         run: uname -a
@@ -182,8 +183,8 @@ jobs:
           - { arch: x64, vsArch: x64, buildType: Release, os: windows-latest, msvc: 18 }
           - { arch: Win32, vsArch: x86, buildType: Debug, os: windows-latest, msvc: 18 }
           - { arch: Win32, vsArch: x86, buildType: Release, os: windows-latest, msvc: 18 }
-          - { arch: ARM64, vsArch: arm64, buildType: Debug, os: windows-11-arm, msvc: 17 }
-          - { arch: ARM64, vsArch: arm64, buildType: Release, os: windows-11-arm, msvc: 17 }
+          - { arch: ARM64, vsArch: arm64, buildType: Debug, os: windows-11-arm, msvc: 18 }
+          - { arch: ARM64, vsArch: arm64, buildType: Release, os: windows-11-arm, msvc: 18 }
     steps:
       - uses: actions/checkout@v7
       - name: build
@@ -469,11 +470,39 @@ jobs:
           wasmtime run build/qjs -qd
           echo "console.log('hello wasi!');" > t.js
           wasmtime run --dir . build/qjs t.js
+          wasmtime run --dir . build/qjs --stack-size 64K tests/wasi-stack-limit.js
+          wasmtime run --dir . build/qjs tests/wasi-stack-limit.js
       - name: build wasi reactor
         run: |
           cmake -B build -DQJS_BUILD_WERROR=ON -DCMAKE_TOOLCHAIN_FILE=/opt/wasi-sdk/share/cmake/wasi-sdk.cmake -DQJS_WASI_REACTOR=ON
           make -C build qjs_wasi
           ls -lh build/qjs.wasm
+      - name: check wasi reactor exports
+        run: |
+          exports=$(/opt/wasi-sdk/bin/llvm-nm --extern-only --defined-only --just-symbol-name build/qjs.wasm)
+          expected=(
+            # Reactor entry points
+            qjs_init qjs_init_argv qjs_get_context qjs_destroy
+            # libc allocator
+            malloc free realloc calloc
+            # Some of core JS_EXTERN API
+            JS_NewRuntime JS_FreeRuntime JS_NewContext JS_FreeContext
+            JS_Eval JS_FreeValue JS_GetException JS_ToCStringLen2
+            # Some of quickjs-libc JS_LIBC_EXTERN API
+            js_std_add_helpers js_std_init_handlers
+          )
+          missing=0
+          for sym in "${expected[@]}"; do
+            echo "$exports" | grep -qx "$sym" || { echo "missing export: $sym"; missing=1; }
+          done
+          exit $missing
+      - name: check wasi reactor table is exported and growable
+        shell: node {0}
+        run: |
+          const m = new WebAssembly.Module(require('fs').readFileSync('build/qjs.wasm'));
+          const imports = {};
+          for (const i of WebAssembly.Module.imports(m)) (imports[i.module] ??= {})[i.name] = () => {};
+          new WebAssembly.Instance(m, imports).exports.__indirect_function_table.grow(1);
 
   cygwin:
     runs-on: windows-latest

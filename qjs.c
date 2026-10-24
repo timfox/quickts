@@ -381,7 +381,7 @@ static const JSMallocFunctions mi_mf = {
     js_mi_malloc,
     js_mi_free,
     js_mi_realloc,
-    mi_malloc_usable_size
+    mi_usable_size
 };
 #endif
 
